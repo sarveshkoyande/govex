@@ -1,0 +1,816 @@
+// GovEx Command Center — Stage 0 data model
+// ---------------------------------------------------------------------------
+// Provider is SQLite for local-first Stage 0. It is Postgres-ready: to move to
+// Postgres, change `provider` to "postgresql" and point DATABASE_URL at it.
+// (SQLite has no native enums/arrays, so enum-like fields are String + are
+//  validated in the app layer via zod — see lib/enums.ts.)
+// ---------------------------------------------------------------------------
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ===========================================================================
+// Tenancy & identity  (SaaS-shaped from day one; Stage 0 seeds ONE org)
+// ===========================================================================
+
+model Organization {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // When true, drafted skill patches (lib/skillPatch.ts) apply immediately
+  // instead of waiting for SYSTEM_ADMIN approval in the Skills Library.
+  autoApproveSkillPatches Boolean @default(false)
+
+  users             User[]
+  memberships       Membership[]
+  domains           Domain[]
+  trackers          Tracker[]
+  ingestionApiKeys  IngestionApiKey[]
+  outboundWebhook   OutboundWebhookConfig?
+  chatSessions      ChatSession[]
+  insightFeedback   InsightFeedback[]
+  skillPatchProposals SkillPatchProposal[]
+  customSkills      CustomSkill[]
+  entityMentions    EntityMention[]
+}
+
+// Org-scoped skills created live via the Skills Library's "describe a skill"
+// editor (skills/skill-authoring.md) — the DB-backed counterpart to the
+// built-in file-based skills in lib/skillRegistry.ts. Exists because a brand
+// new skill needs to be usable by the chat orchestrator's apply_skill tool
+// immediately, with no code deploy — a plain file write can't do that since
+// SkillName is a compile-time TypeScript union. Built-in skills stay files;
+// only org-authored ones live here.
+model CustomSkill {
+  id          String   @id @default(cuid())
+  orgId       String
+  name        String   // slug, unique per org — same role as SkillName for built-ins
+  title       String
+  description String   // shown in the apply_skill tool description, same as SKILL_REGISTRY entries
+  category    String   // synthesis | framework | financial | question — same taxonomy as built-ins
+  content     String   // the actual skill instructions
+  createdBy   String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  org Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@unique([orgId, name])
+  @@index([orgId])
+}
+
+// One row per upvote/downvote on a StrategyInsight (only insight type wired
+// up for voting so far — see components/trackers/ThemeTabs.tsx). A DOWN vote
+// requires `note` (why it's bad) and triggers a background skill-patch draft
+// (lib/skillPatch.ts). Kept as an event log, not a counter on the insight
+// itself, so multiple votes/reasons over time are all preserved.
+model InsightFeedback {
+  id          String   @id @default(cuid())
+  orgId       String
+  insightType String   // "STRATEGY" — the only type wired up so far
+  insightId   String
+  vote        String   // "UP" | "DOWN"
+  note        String?  // required for DOWN
+  createdBy   String
+  createdAt   DateTime @default(now())
+
+  org Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@index([orgId])
+  @@index([insightType, insightId])
+}
+
+// A Gemini-drafted improvement to a skill file, triggered by a downvote's
+// feedback note (skills/skill-patch-drafting.md). Never writes to the actual
+// skill .md file until approved (or immediately, if autoApproveSkillPatches
+// is on) — same human-confirm discipline as every other AI-proposed write in
+// this app, just applied to a shared skill instead of tracker data.
+model SkillPatchProposal {
+  id               String    @id @default(cuid())
+  orgId            String
+  skillName        String
+  currentContent   String    // empty string for a brand-new skill (isNewSkill = true)
+  proposedContent  String
+  reasoning        String
+  sourceFeedbackId String?   // null for editor-authored proposals (no downvote behind them)
+  // A brand-new skill (never seen before, isNewSkill = true) is created as a
+  // CustomSkill row on approval. An existing skill being extended has
+  // targetIsCustom = true if that existing skill is itself a CustomSkill
+  // (update its row) vs false if it's a built-in file (overwrite the .md,
+  // the original behavior). newSkillTitle/Description/Category are only
+  // populated when isNewSkill is true — CustomSkill needs them at creation.
+  isNewSkill          Boolean @default(false)
+  targetIsCustom      Boolean @default(false)
+  newSkillTitle       String?
+  newSkillDescription String?
+  newSkillCategory    String?
+  status           String    @default("PENDING") // PENDING | APPROVED | REJECTED | AUTO_APPLIED
+  createdAt        DateTime  @default(now())
+  reviewedBy       String?
+  reviewedAt       DateTime?
+
+  org Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@index([orgId])
+}
+
+// ===========================================================================
+// Goal-oriented chat agent. A ChatSession holds the raw Gemini `Content[]`
+// history (historyJson) so lib/agent.ts can resume the exact multi-turn
+// function-calling conversation; ChatMessage rows are a separate, simpler
+// projection used purely to render the transcript in the UI. Write-actions
+// (create an action item, draft a stakeholder question) are never executed
+// directly by a tool call — they land as a PENDING proposal on a ChatMessage
+// and only run once the user confirms in the widget (see app/actions/chat.ts).
+// ===========================================================================
+
+model ChatSession {
+  id          String @id @default(cuid())
+  orgId       String
+  userId      String
+  title       String @default("New chat")
+  historyJson String @default("[]") // raw Gemini Content[] turns, for resuming the agent loop
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  org      Organization  @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  user     User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages ChatMessage[]
+
+  @@index([orgId])
+  @@index([userId])
+}
+
+model ChatMessage {
+  id        String @id @default(cuid())
+  sessionId String
+
+  role       String  // user | assistant | tool
+  content    String? // display text (assistant/user turns)
+  toolName   String? // set for tool-call/result turns, for transcript rendering
+  toolArgs   String? // JSON
+  toolResult String? // JSON
+
+  // Pending human-confirmed write-actions proposed by the agent.
+  proposalKind      String? // CREATE_ACTION | DRAFT_QUESTION
+  proposalPayload   String? // JSON describing what would be created
+  proposalStatus    String? // PENDING | CONFIRMED | REJECTED
+  proposalTrackerId String?
+
+  createdAt DateTime @default(now())
+
+  session ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+}
+
+// ===========================================================================
+// Stage 1 — Ingestion.
+// Power Automate (or any external caller) POSTs to /api/ingest with a Bearer
+// token that hashes to one of this org's IngestionApiKey rows. No synthesis
+// happens here — payloads are stored as-is (RawIngestionEvent) so Stage 2 can
+// later read and derive insights from them. See lib/ingestion.ts.
+// ===========================================================================
+
+model IngestionApiKey {
+  id           String    @id @default(cuid())
+  orgId        String
+  label        String
+  tokenHash    String    @unique // sha256 hex of the raw token; raw value shown once at creation
+  tokenPreview String    // last 4 chars of the raw token, for display in lists
+  revoked      Boolean   @default(false)
+  createdAt    DateTime  @default(now())
+  createdBy    String?
+  lastUsedAt   DateTime?
+
+  org    Organization        @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  events RawIngestionEvent[]
+
+  @@index([orgId])
+}
+
+model RawIngestionEvent {
+  id        String  @id @default(cuid())
+  // Nullable — a CONTEXT_DOC (see source below) can arrive for a domain that
+  // doesn't have a Tracker yet (Commercial AI, DAAI, Transform AI, Large
+  // Deal & GTM all currently have a Domain but no Tracker). Exactly one of
+  // trackerId/domainId is set; trackerId wins when both a tracker and its
+  // parent domain exist, since that's the more specific scope.
+  trackerId String?
+  domainId  String?
+  apiKeyId  String?
+
+  source       String   // EMAIL | MEETING | TEAMS | CONTEXT_DOC
+  sourceSystem String   // e.g. "outlook", "teams", "manual-test"
+  subject      String?
+  fromAddress  String?  // sender email / meeting organizer
+  participants String?  // free-text list of names/emails
+  occurredAt   DateTime // when the email was sent / meeting happened
+  rawText      String   // body / transcript / notes, preserved untouched
+  rawPayload   String?  // full original JSON payload, serialized, for traceability
+  status       String   @default("RECEIVED") // RECEIVED | REVIEWED
+  ingestedVia  String   @default("webhook")  // webhook | manual_test
+  // Generated once in the background right after ingestion (skills/ingestion-summary.md),
+  // sized proportionally to rawText — used as the lightweight manifest entry
+  // for search_raw_events, so the orchestrator can judge relevance without
+  // pulling full text for every event. Null until the background job finishes.
+  summary      String?
+
+  createdAt DateTime @default(now())
+
+  tracker Tracker?         @relation(fields: [trackerId], references: [id], onDelete: Cascade)
+  domain  Domain?          @relation(fields: [domainId], references: [id], onDelete: Cascade)
+  apiKey  IngestionApiKey? @relation(fields: [apiKeyId], references: [id], onDelete: SetNull)
+  answersQuestion OpenQuestion? // Stage 3 — set when this event was tagged as an answer
+
+  @@index([trackerId])
+  @@index([domainId])
+  @@index([apiKeyId])
+}
+
+// Knowledge-graph edge: "this piece of source text refers to that entity."
+// Two extraction tiers write here: dictionary matching (free, deterministic
+// — tracker/stakeholder/glossary-term name matches) and a conceptual Gemini
+// pass (thematic connections with no shared vocabulary). `method`
+// distinguishes them so the graph UI can style/filter each differently.
+model EntityMention {
+  id     String @id @default(cuid())
+  orgId  String
+
+  // Polymorphic, not a hard FK — mentions can originate from raw ingestion
+  // text OR from already-materialized StrategyInsight/TacticInsight text
+  // (e.g. "$327K Pfizer PAVE" living inside a BioPharm TacticInsight is
+  // exactly the motivating case; a hard FK to RawIngestionEvent alone would
+  // have missed it). Same loose-reference pattern AiSuggestion.sourceEventIds
+  // already uses elsewhere in this codebase for the same reason.
+  sourceType String // RAW_EVENT | STRATEGY_INSIGHT | TACTIC_INSIGHT
+  sourceId   String
+
+  targetType String  // TRACKER | STAKEHOLDER | TERM
+  targetId   String? // Tracker.id or Stakeholder.id when targetType is TRACKER/STAKEHOLDER
+  targetTerm String? // the literal term/phrase when targetType is TERM (no registry row to point to)
+
+  method     String  // DICTIONARY | CONCEPTUAL
+  contextSnippet String // the sentence/phrase the mention was found in
+  confidence Int     @default(100) // DICTIONARY matches are always 100; CONCEPTUAL matches carry Gemini's own confidence
+  reasoning  String? // CONCEPTUAL only — why the model thinks these are connected
+
+  createdAt DateTime @default(now())
+
+  org Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@index([orgId])
+  @@index([sourceType, sourceId])
+  @@index([targetType, targetId])
+}
+
+model User {
+  id           String   @id @default(cuid())
+  orgId        String
+  email        String   @unique
+  name         String?
+  // Stage 0: bcrypt password (Credentials provider). Null for SSO users later.
+  passwordHash String?
+  // Keycloak-swap hooks: when we move auth to Keycloak 10.0.2 (OIDC), the
+  // provider `sub` lands in externalId and authProvider becomes "keycloak".
+  // Existing rows are matched by email, so no data migration is needed.
+  externalId   String?
+  authProvider String   @default("credentials")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  org          Organization  @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  memberships  Membership[]
+  chatSessions ChatSession[]
+
+  @@index([orgId])
+  @@index([externalId])
+}
+
+// RBAC per BRD §10. role ∈ EXEC_VIEWER | THEME_OWNER | ACTION_OWNER |
+//                          CONTENT_ADMIN | PUBLISHER | SYSTEM_ADMIN
+model Membership {
+  id     String @id @default(cuid())
+  userId String
+  orgId  String
+  role   String @default("EXEC_VIEWER")
+
+  user User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  org  Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, orgId])
+  @@index([orgId])
+}
+
+// ===========================================================================
+// Domain / Portfolio  (BioPharm & Media, Tectonic, DAAI, MIRAI, ...)
+// ===========================================================================
+
+model Domain {
+  id           String   @id @default(cuid())
+  orgId        String
+  name         String
+  slug         String
+  displayOrder Int      @default(0)
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  org      Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  trackers Tracker[]
+  ingestionEvents RawIngestionEvent[]
+
+  @@unique([orgId, slug])
+  @@index([orgId])
+}
+
+// ===========================================================================
+// Tracker  (= a theme/tracker — the core entity)
+// ===========================================================================
+
+model Tracker {
+  id       String @id @default(cuid())
+  orgId    String
+  domainId String
+
+  name        String
+  description String?
+
+  strategyObjective String? // from the strategy template
+  okrObjective      String?
+
+  lifecycleStatus String @default("DRAFT")    // DRAFT | ACTIVE | ARCHIVED
+  ragStatus       String @default("GREEN")    // RED | AMBER | GREEN
+  signalStatus    String @default("ON_TRACK") // RISK | WATCH | ON_TRACK | OPPORTUNITY
+
+  ownerId   String? // resolved User (optional at Stage 0)
+  ownerName String? // free-text fallback / display
+  targetPeriod String? // e.g. "FY27"
+
+  // Headline financials as FIRST-CLASS fields (non-negotiable #5).
+  // Detailed period series live in FinancialMetric below.
+  currency String  @default("USD")
+  budget   Float?
+  spend    Float?
+  forecast Float?
+
+  overallConfidence Int @default(50) // 0-100
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  createdBy String?
+  updatedBy String?
+
+  org    Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  domain Domain       @relation(fields: [domainId], references: [id])
+
+  stakeholders     Stakeholder[]
+  financialMetrics FinancialMetric[]
+  risks            Risk[]
+  nextActions      NextAction[]
+  decisionLog      DecisionLogEntry[]
+  // Strategy layer — matches the sample theme page's 4 sections:
+  strategyGoals    StrategyGoal[]     // "Integration Hypothesis & Objective" (Strategy tab)
+  okrs             Okr[]              // OKR carousel (Strategy tab)
+  microBattles     MicroBattle[]      // Execution + Outcomes tabs
+  strategyInsights StrategyInsight[]  // "Strategy vs Outcome" synthesis tab
+  fieldStates      FieldState[]
+  fieldChanges     FieldChange[]
+  rawIngestionEvents RawIngestionEvent[] // Stage 1 — raw email/meeting payloads, no synthesis
+  synthesisRuns      SynthesisRun[]      // Stage 2 — Gemini synthesis runs
+  aiSuggestions      AiSuggestion[]      // Stage 2 — draft suggestions pending review
+  openQuestions      OpenQuestion[]      // Stage 3 — curiosity loop
+
+  @@index([orgId])
+  @@index([domainId])
+}
+
+// ===========================================================================
+// Enumerated child lists (the point-3 required fields)
+// ===========================================================================
+
+model Stakeholder {
+  id        String @id @default(cuid())
+  trackerId String
+
+  name          String
+  email         String?
+  roleOnTracker String? // e.g. "Finance SPOC", "Integration Head"
+  ownsWhat      String? // the area they own — drives the Stage-3 curiosity loop
+  isPrimary     Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tracker Tracker @relation(fields: [trackerId], references: [id], onDelete: Cascade)
+  openQuestions OpenQuestion[] // Stage 3 — questions directed at this stakeholder
+
+  @@index([trackerId])
+}
+
+model FinancialMetric {
+  id        String @id @default(cuid())
+  trackerId String
+
+  label    String  // "Net Revenue", "Gross Margin %", "Cost Synergies", "OpEx", "Baseline"
+  period   String? // "Q1 CY26", "FY27"
+  unit     String  @default("USD_M") // USD_M | PCT | COUNT
+  planned  Float?
+  actual   Float?
+  forecast Float?
+
+  confidence Int    @default(50)
+  source     String @default("MANUAL") // MANUAL | EMAIL | MEETING | GEMINI
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tracker Tracker @relation(fields: [trackerId], references: [id], onDelete: Cascade)
+
+  @@index([trackerId])
+}
+
+model Risk {
+  id        String @id @default(cuid())
+  trackerId String
+
+  title      String
+  severity   String  @default("Medium") // High | Medium | Low
+  status     String  @default("Open")   // Open | Mitigated | Closed
+  mitigation String?
+  owner      String?
+  confidence Int     @default(50)
+  source     String  @default("MANUAL")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tracker Tracker @relation(fields: [trackerId], references: [id], onDelete: Cascade)
+
+  @@index([trackerId])
+}
+
+model NextAction {
+  id        String @id @default(cuid())
+  trackerId String
+
+  title         String
+  description   String?
+  owner         String?
+  assigneeGroup String  @default("you")    // you | team  (maps to sample ActionTracker)
+  priority      String  @default("medium") // high | medium | low
+  status        String  @default("open")   // open | in_progress | done
+  dueDate       String? // free-text like the sample ("Oct 5", "Ongoing", "—")
+  source        String  @default("MANUAL")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tracker Tracker @relation(fields: [trackerId], references: [id], onDelete: Cascade)
+
+  @@index([trackerId])
+}
+
+model DecisionLogEntry {
+  id        String @id @default(cuid())
+  trackerId String
+
+  decision  String
+  rationale String?
+  decidedBy String?
+  decidedOn DateTime?
+  source    String    @default("MANUAL")
+
+  createdAt DateTime @default(now())
+
+  tracker Tracker @relation(fields: [trackerId], references: [id], onDelete: Cascade)
+
+  @@index([trackerId])
+}
+
+// ===========================================================================
+// Strategy layer — modelled to match the sample theme page (source of truth):
+//   Strategy tab            → StrategyGoal[] + Okr[]
+//   Execution / Outcomes    → MicroBattle → ExecutionTactic → TacticInsight[]
+//                             (each tactic carries a 1:1 expectedOutcome string)
+//   Strategy vs Outcome tab → StrategyInsight[]
+// The BRD content types are all preserved: strategic objectives (StrategyGoal),
+// OKRs (Okr), micro-battles, execution tactics, expected outcomes (tactic field),
+// execution insights + outcome insights (TacticInsight.kind), and the Layer-4
+// strategy-vs-outcome synthesis (StrategyInsight).
+// ===========================================================================
+
+model StrategyGoal {
+  id        String @id @default(cuid())
+  trackerId String
+  text      String
+  order     Int    @default(0)
+
+  tracker Tracker @relation(fields: [trackerId], references: [id], onDelete: Cascade)
+
+  @@index([trackerId])
+}
+
+model Okr {
+  id        String  @id @default(cuid())
+  trackerId String
+  title     String
+  metrics   String? // e.g. "20% YoY growth"
+  tags      String? // comma-separated, e.g. "Media"
+  order     Int     @default(0)
+
+  tracker Tracker @relation(fields: [trackerId], references: [id], onDelete: Cascade)
+
+  @@index([trackerId])
+}
+
+model MicroBattle {
+  id        String @id @default(cuid())
+  trackerId String
+
+  code       String? // "MB1"
+  name       String
+  ragStatus  String  @default("GREEN") // RED | AMBER | GREEN
+  order      Int     @default(0)
+  confidence Int     @default(50)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tracker          Tracker           @relation(fields: [trackerId], references: [id], onDelete: Cascade)
+  executionTactics ExecutionTactic[]
+
+  @@index([trackerId])
+}
+
+model ExecutionTactic {
+  id            String @id @default(cuid())
+  microBattleId String
+
+  name            String
+  expectedOutcome String? // 1:1 paired expected outcome (Outcomes tab)
+  owner           String?
+  status          String  @default("Open") // Open | Active | Done | TBD
+  order           Int     @default(0)
+  confidence      Int     @default(50)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  microBattle MicroBattle    @relation(fields: [microBattleId], references: [id], onDelete: Cascade)
+  insights    TacticInsight[]
+  aiSuggestions AiSuggestion[] // Stage 2 — suggestions targeting this tactic
+
+  @@index([microBattleId])
+}
+
+// Execution insights AND outcome insights, distinguished by `kind`.
+model TacticInsight {
+  id       String @id @default(cuid())
+  tacticId String
+
+  kind       String // EXECUTION | OUTCOME
+  signal     String @default("NONE") // RISK | WATCH | ON_TRACK | OPPORTUNITY | NONE
+  text       String
+  category   String?
+  order      Int     @default(0)
+  source     String  @default("MANUAL") // MANUAL | GEMINI
+  confidence Int     @default(50)       // 0-100; meaningful for GEMINI-sourced rows
+
+  createdAt DateTime @default(now())
+
+  tactic ExecutionTactic @relation(fields: [tacticId], references: [id], onDelete: Cascade)
+
+  @@index([tacticId])
+}
+
+// Layer-4 "Strategy vs Outcome" synthesis cards.
+model StrategyInsight {
+  id          String  @id @default(cuid())
+  trackerId   String
+  title       String
+  description String?
+  order       Int     @default(0)
+  source      String  @default("MANUAL") // MANUAL | GEMINI
+  confidence  Int     @default(50)
+
+  tracker Tracker @relation(fields: [trackerId], references: [id], onDelete: Cascade)
+
+  @@index([trackerId])
+}
+
+// ===========================================================================
+// Stage 2 — Synthesis (Gemini-powered, human-in-the-loop).
+//
+// A SynthesisRun reads a tracker's RawIngestionEvents + current strategy data,
+// calls Gemini via the skill-file pattern (see lib/skills.ts), and produces
+// AiSuggestion rows — DRAFTS ONLY. Nothing here is visible on the live
+// dashboard. A human must approve a suggestion (see app/actions/synthesis.ts)
+// before it is materialized into a real TacticInsight or StrategyInsight row
+// (source="GEMINI"). Rejected suggestions are kept, never deleted — matches
+// the "never overwrite historical state" guardrail.
+// ===========================================================================
+
+model SynthesisRun {
+  id        String @id @default(cuid())
+  trackerId String
+
+  status        String   @default("RUNNING") // RUNNING | COMPLETE | FAILED
+  model         String   // e.g. "gemini-2.0-flash"
+  eventIds      String   // JSON array of RawIngestionEvent ids considered
+  errorMessage  String?
+  triggeredBy   String?
+  startedAt     DateTime @default(now())
+  completedAt   DateTime?
+
+  tracker     Tracker        @relation(fields: [trackerId], references: [id], onDelete: Cascade)
+  suggestions AiSuggestion[]
+
+  @@index([trackerId])
+}
+
+model AiSuggestion {
+  id             String  @id @default(cuid())
+  trackerId      String
+  synthesisRunId String
+  targetTacticId String? // set for TACTIC_EXECUTION / TACTIC_OUTCOME kinds
+
+  kind       String // STRATEGY_INSIGHT | TACTIC_EXECUTION | TACTIC_OUTCOME
+  title      String? // used for STRATEGY_INSIGHT
+  text       String  // the proposed insight/description text
+  signal     String  @default("NONE") // RISK | WATCH | ON_TRACK | OPPORTUNITY | NONE
+  confidence Int     @default(50)
+  rationale  String? // why Gemini proposed this
+  sourceEventIds String // JSON array of RawIngestionEvent ids that support this claim
+
+  status       String    @default("PENDING") // PENDING | APPROVED | REJECTED
+  reviewedBy   String?
+  reviewedAt   DateTime?
+  materializedId String? // id of the TacticInsight/StrategyInsight row created on approval
+
+  createdAt DateTime @default(now())
+
+  tracker      Tracker         @relation(fields: [trackerId], references: [id], onDelete: Cascade)
+  synthesisRun SynthesisRun    @relation(fields: [synthesisRunId], references: [id], onDelete: Cascade)
+  targetTactic ExecutionTactic? @relation(fields: [targetTacticId], references: [id], onDelete: SetNull)
+
+  @@index([trackerId])
+  @@index([synthesisRunId])
+  @@index([targetTacticId])
+}
+
+// ===========================================================================
+// Stage 3 — Curiosity loop.
+//
+// Rule-based gap detectors (lib/gaps.ts) find things GovEx doesn't yet know
+// (a stale field, a risk with no mitigation, a decision with no rationale).
+// Gemini drafts a specific, targeted question per gap (lib/questions.ts) —
+// draft only, human-reviewed. On approval, GovEx POSTs the question to the
+// org's configured Power Automate webhook (lib/outbound.ts) — if none is
+// configured, it's marked "asked" with delivery status NOT_CONFIGURED so the
+// rest of the loop stays testable. A stakeholder's reply comes back through
+// the SAME /api/ingest endpoint from Stage 1, tagged with answersQuestionId.
+// ===========================================================================
+
+model OutboundWebhookConfig {
+  id     String  @id @default(cuid())
+  orgId  String  @unique
+  url    String
+  secret String? // sent as `Authorization: Bearer <secret>` to the receiving flow
+  active Boolean @default(true)
+
+  updatedAt  DateTime @updatedAt
+  updatedBy  String?
+  lastUsedAt DateTime?
+  lastStatus String?  // SUCCESS | FAILED
+  lastError  String?
+
+  org Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+}
+
+model OpenQuestion {
+  id        String  @id @default(cuid())
+  trackerId String
+  stakeholderId String?
+  answerEventId String? @unique // set once a tagged reply arrives via /api/ingest
+
+  // Stable pattern key — doubles as the Stage 4 "which question types get
+  // useful answers" scoring dimension per the philosophy (Section 2.4).
+  questionPattern String // STALE_FIELD | NO_MITIGATION | MISSING_RATIONALE
+  targetSummary   String // human-readable pointer to what's missing, e.g. "Risk: ..."
+  questionText    String
+  rationale       String?
+  confidence      Int    @default(60)
+  source          String @default("GEMINI") // GEMINI | MANUAL
+
+  status String @default("DRAFT") // DRAFT | APPROVED | ASKED | ANSWERED | DISMISSED
+
+  deliveryStatus String? // SENT | NOT_CONFIGURED | FAILED
+  deliveryError  String?
+
+  createdAt  DateTime  @default(now())
+  approvedBy String?
+  approvedAt DateTime?
+  askedAt    DateTime?
+  answeredAt DateTime?
+
+  // Stage 4 — Gemini's judgment of the reply, set automatically once answered.
+  answerVerdict          String?   // USEFUL | NON_ANSWER
+  answerVerdictReasoning String?
+  evaluatedAt            DateTime?
+
+  tracker     Tracker            @relation(fields: [trackerId], references: [id], onDelete: Cascade)
+  stakeholder Stakeholder?       @relation(fields: [stakeholderId], references: [id], onDelete: SetNull)
+  answerEvent RawIngestionEvent? @relation(fields: [answerEventId], references: [id], onDelete: SetNull)
+
+  @@index([trackerId])
+  @@index([stakeholderId])
+}
+
+// ===========================================================================
+// Stage 4 — Learning loop (Section 2.4: "it learns which questions were
+// good"). One row per (org, questionPattern). Recomputed after every answer
+// evaluation (lib/evaluation.ts). `enabled` gates whether lib/gaps.ts will
+// keep proposing new questions of this pattern — auto-disabled once a
+// pattern has enough samples and a low useful-rate, but always visible and
+// human-reversible (never a silent black box).
+// ===========================================================================
+
+model QuestionPatternStats {
+  id    String @id @default(cuid())
+  orgId String
+
+  questionPattern String
+
+  askedCount     Int @default(0)
+  answeredCount  Int @default(0)
+  usefulCount    Int @default(0)
+  nonAnswerCount Int @default(0)
+
+  enabled        Boolean   @default(true)
+  disabledAt     DateTime?
+  disabledReason String?
+  reenabledBy    String?
+  reenabledAt    DateTime?
+
+  updatedAt DateTime @updatedAt
+
+  @@unique([orgId, questionPattern])
+  @@index([orgId])
+}
+
+// ===========================================================================
+// Per-field confidence + staleness  AND  append-only history.
+// These are the philosophy's distinctive layer. Stage 0 writes them manually
+// (source=MANUAL); Stages 2-4 populate EMAIL/MEETING/GEMINI sources.
+// Polymorphic by (entityType, entityId), always scoped to a Tracker.
+// ===========================================================================
+
+model FieldState {
+  id         String @id @default(cuid())
+  trackerId  String
+  entityType String // "Tracker" | "FinancialMetric" | "Risk" | "MicroBattle" | ...
+  entityId   String
+  fieldKey   String // e.g. "status", "budget", "summary"
+
+  confidence     Int      @default(50) // 0-100
+  source         String   @default("MANUAL")
+  staleAfterDays Int      @default(90)
+  lastUpdatedAt  DateTime @default(now())
+  lastUpdatedBy  String?
+
+  tracker Tracker @relation(fields: [trackerId], references: [id], onDelete: Cascade)
+
+  @@unique([entityType, entityId, fieldKey])
+  @@index([trackerId])
+}
+
+model FieldChange {
+  id         String @id @default(cuid())
+  trackerId  String
+  entityType String
+  entityId   String
+  fieldKey   String
+
+  oldValue        String?
+  newValue        String?
+  changedBy       String?
+  source          String   @default("MANUAL")
+  confidenceAfter Int?
+  changedAt       DateTime @default(now())
+
+  tracker Tracker @relation(fields: [trackerId], references: [id], onDelete: Cascade)
+
+  @@index([trackerId])
+  @@index([entityType, entityId])
+}
