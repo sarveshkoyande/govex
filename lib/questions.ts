@@ -25,7 +25,7 @@ ${stakeholders.map((s) => `- id="${s.id}" name="${s.name}" ownsWhat="${s.ownsWha
 
 ## Gaps to turn into questions (use the EXACT "targetSummary" string back in your response so we can match your question to the right gap)
 
-${gaps.map((g, i) => `${i + 1}. targetSummary="${g.targetSummary}"\n   reason: ${g.rationale}`).join("\n")}
+${gaps.map((g, i) => `${i + 1}. [${g.pattern}] targetSummary="${g.targetSummary}"\n   reason: ${g.rationale}`).join("\n")}
 
 ## Required JSON output schema
 

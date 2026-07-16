@@ -63,7 +63,7 @@ ${draft.decisionLog.map((d) => `- ${d.decision} — rationale: ${d.rationale || 
 
 ## Required JSON output schema
 
-{ "gaps": [ { "targetSummary": string, "rationale": string } ] }
+{ "gaps": [ { "gapType": "MISSING_STRATEGY"|"MISSING_TACTIC", "targetSummary": string, "rationale": string } ] }
 
 Return ONLY the JSON object, no markdown fences, no other text.`;
 
@@ -86,7 +86,7 @@ Return ONLY the JSON object, no markdown fences, no other text.`;
   if (!result.success) return [];
 
   return result.data.gaps.map((g) => ({
-    pattern: "AI_WHOLE_TRACKER_GAP" as const,
+    pattern: g.gapType,
     targetSummary: g.targetSummary,
     rationale: g.rationale,
   }));

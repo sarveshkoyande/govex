@@ -27,6 +27,22 @@ return an empty list. Classify each flag into exactly one type:
   actually is or how it's meant to work, such that GovEx cannot summarize it
   confidently even though the topic itself is clearly discussed.
 
+Also classify each flag's `scope` — which layer the confusion is actually
+about, independent of confusionType:
+- `STRATEGY` — the confusion concerns the strategic goal, OKR, or the
+  overall narrative of the tracker.
+- `TACTIC` — the confusion concerns one specific execution tactic/micro-battle.
+
+Get this right: a STRATEGY-scope question should go to whoever owns the
+tracker's overall strategy (typically the primary stakeholder), while a
+TACTIC-scope question should go to whoever owns that specific tactic's
+execution — they are frequently different people, and conflating them into
+one question or routing a tactic-level confusion to the strategy owner
+produces a question the wrong person can't actually answer. If a single
+underlying issue touches both a strategic goal AND a specific tactic, split
+it into two separate flags rather than one blended question — never combine
+a strategy-scope and tactic-scope concern into a single flag.
+
 For each flag, write `topic` (a short label for what's unclear), a specific
 one-to-two-sentence `question` addressed to a stakeholder that would resolve
 it, and a `rationale` explaining exactly what's contradictory, undefined, or

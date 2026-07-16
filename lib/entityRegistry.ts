@@ -11,23 +11,73 @@ export interface RegistryEntry {
   targetTerm: string | null; // set for TERM, null otherwise
   aliases: string[]; // lowercased, longest-first is not required — caller sorts
   orgId: string;
+  // "universal" = generic governance/PM jargon (SteerCo, TSA, AOR...) that
+  // nearly every engagement uses — real when read within one theme, but
+  // meaningless as a CROSS-theme graph edge (every theme "having a SteerCo"
+  // isn't a connection). "specific" = a named program/metric distinctive
+  // enough that two themes sharing it is real signal. Only "specific" terms
+  // are allowed to produce shared-term edges between themes — see graphData.ts.
+  scope?: "universal" | "specific";
 }
 
 // Glossary terms worth tracking as graph nodes even though they have no DB
 // row of their own — hand-curated from the context docs' own glossary
 // sections (the docs explicitly say "GovEx should use this to decode
 // terminology in future uploads"), not invented.
-const GLOSSARY_TERMS = [
-  "PDE", "DRE", "Digital Rep Equivalence", "JSC", "Joint Steering Committee",
-  "TSA", "Transition Services Agreement", "GDM", "Global Delivery Model",
-  "3-in-a-box", "SteerCo", "AOR", "Agency of Record", "KOL AOR",
-  "Peer-to-Peer360", "brand360", "Insights360",
-  "NBA", "Next Best Action", "OCI", "CDP", "RWE", "Real-World Evidence",
-  "HEOR", "MLR", "NEXT OCI", "Invisage", "DEMA", "CXQ",
-  "NUDGE", "GAIN", "IST", "Integrated Solutions Team", "Project PRIDE",
-  "Operational AI", "Evolved AI", "AI Score", "RPE", "Revenue Per Employee",
-  "Capability Squad", "Role-Process Duality", "Refractive Analysis",
+const GLOSSARY_TERMS: { term: string; scope: "universal" | "specific" }[] = [
+  { term: "JSC", scope: "universal" },
+  { term: "Joint Steering Committee", scope: "universal" },
+  { term: "TSA", scope: "universal" },
+  { term: "Transition Services Agreement", scope: "universal" },
+  { term: "GDM", scope: "universal" },
+  { term: "Global Delivery Model", scope: "universal" },
+  { term: "3-in-a-box", scope: "universal" },
+  { term: "SteerCo", scope: "universal" },
+  { term: "AOR", scope: "universal" },
+  { term: "Agency of Record", scope: "universal" },
+  { term: "IST", scope: "universal" },
+  { term: "Integrated Solutions Team", scope: "universal" },
+  { term: "MLR", scope: "universal" }, // Medical-Legal-Regulatory review — standard life-sciences jargon, not a distinctive program
+
+  { term: "PDE", scope: "specific" },
+  { term: "DRE", scope: "specific" },
+  { term: "Digital Rep Equivalence", scope: "specific" },
+  { term: "KOL AOR", scope: "specific" },
+  { term: "Peer-to-Peer360", scope: "specific" },
+  { term: "brand360", scope: "specific" },
+  { term: "Insights360", scope: "specific" },
+  { term: "NBA", scope: "specific" },
+  { term: "Next Best Action", scope: "specific" },
+  { term: "OCI", scope: "specific" },
+  { term: "NEXT OCI", scope: "specific" },
+  { term: "CDP", scope: "specific" },
+  { term: "RWE", scope: "specific" },
+  { term: "Real-World Evidence", scope: "specific" },
+  { term: "HEOR", scope: "specific" },
+  { term: "Invisage", scope: "specific" },
+  { term: "DEMA", scope: "specific" },
+  { term: "CXQ", scope: "specific" },
+  { term: "NUDGE", scope: "specific" },
+  { term: "GAIN", scope: "specific" },
+  { term: "Project PRIDE", scope: "specific" },
+  { term: "Operational AI", scope: "specific" },
+  { term: "Evolved AI", scope: "specific" },
+  { term: "AI Score", scope: "specific" },
+  { term: "RPE", scope: "specific" },
+  { term: "Revenue Per Employee", scope: "specific" },
+  { term: "Capability Squad", scope: "specific" },
+  { term: "Role-Process Duality", scope: "specific" },
+  { term: "Refractive Analysis", scope: "specific" },
 ];
+
+const TERM_SCOPE = new Map(GLOSSARY_TERMS.map((g) => [g.term, g.scope]));
+
+// Used by graphData.ts to decide whether a shared term is real cross-theme
+// signal ("specific") or just universal jargon every theme happens to use
+// ("universal") — graphs only draw an edge for the former.
+export function isSpecificTerm(term: string): boolean {
+  return TERM_SCOPE.get(term) === "specific";
+}
 
 export async function buildRegistry(orgId: string): Promise<RegistryEntry[]> {
   const [trackers, stakeholders] = await Promise.all([
@@ -57,8 +107,8 @@ export async function buildRegistry(orgId: string): Promise<RegistryEntry[]> {
     entries.push({ targetType: "STAKEHOLDER", targetId: s.id, targetTerm: null, aliases, orgId });
   }
 
-  for (const term of GLOSSARY_TERMS) {
-    entries.push({ targetType: "TERM", targetId: null, targetTerm: term, aliases: [term.toLowerCase()], orgId });
+  for (const { term, scope } of GLOSSARY_TERMS) {
+    entries.push({ targetType: "TERM", targetId: null, targetTerm: term, aliases: [term.toLowerCase()], orgId, scope });
   }
 
   return entries;

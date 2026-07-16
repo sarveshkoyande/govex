@@ -53,6 +53,24 @@ export const SKILL_REGISTRY: SkillMeta[] = [
     category: "framework",
   },
   {
+    name: "framework-7s-biopharm",
+    title: "7S Alignment Framework (BioPharm)",
+    description: "McKinsey 7S adapted for post-merger integration engagements — checks whether an acquired practice is actually fusing into the parent firm's operating model. Tailored to BioPharm & Media Integration specifically.",
+    category: "framework",
+  },
+  {
+    name: "alliance-health-pfizer-pave",
+    title: "Alliance Health Framework (Pfizer PAVE)",
+    description: "Strategic alignment, governance cadence, performance/financial health, relationship trust, AI risk & compliance, and flexibility — grounded in the actual PAVE contract terms. For ongoing partnership/alliance engagements, not integrations.",
+    category: "framework",
+  },
+  {
+    name: "jv-marketing-lifecycle-pfizer-pave",
+    title: "4-Quadrant JV Marketing Lifecycle (Pfizer PAVE)",
+    description: "Strategic alignment/IP, co-marketing GTM, operational funnel/attribution, and financial clearance — mapping Pfizer as Product Company and Indegene as Service Company, grounded in the actual PAVE contract mechanics (DRE, PDE, Gross Margin Share, baseline/true-up).",
+    category: "framework",
+  },
+  {
     name: "okr-alignment-assessment",
     title: "OKR Alignment Assessment",
     description: "Checks whether actual execution genuinely ladders up to stated OKRs; flags OKRs with no aligned work and misallocated effort.",

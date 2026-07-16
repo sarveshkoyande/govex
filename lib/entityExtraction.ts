@@ -39,7 +39,16 @@ export async function extractDictionaryMentions(
       const key = `${entry.targetType}:${entry.targetId ?? entry.targetTerm}`;
       if (seen.has(key)) break;
 
-      const idx = lowerText.indexOf(alias);
+      // Word-boundary match, not raw substring — a plain indexOf lets short
+      // aliases like "GAIN" false-positive-match inside ordinary words
+      // (e.g. "against" contains "gain"). \b doesn't fire on a leading
+      // digit/hyphen boundary reliably for terms like "3-in-a-box", so fall
+      // back to substring only for aliases containing non-word characters.
+      const hasWordChars = /^[\w\s]+$/.test(alias);
+      const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const idx = hasWordChars
+        ? lowerText.search(new RegExp(`\\b${escaped}\\b`))
+        : lowerText.indexOf(alias);
       if (idx === -1) continue;
       seen.add(key);
 
@@ -114,23 +123,58 @@ interface Profile {
 }
 
 // One profile per theme with a context-doc brief — its trackerId/domainId
-// scoped CONTEXT_DOC event, using the already-generated summary (not full
-// text) as what gets compared. Themes without a context doc yet are simply
+// scoped CONTEXT_DOC event. Uses the FULL ingested note text, not the short
+// auto-summary: the context docs run 13-20k characters of real strategy,
+// financial, and outcome detail (the "note" for that vertical, Obsidian-
+// style), and a ~1000-char summary was throwing almost all of that away
+// before Gemini ever saw it — which is why conceptual links were shallow
+// ("both involve AI") instead of grounded in the actual specifics. For
+// TRACKER-scoped themes, also fold in StrategyInsight titles/descriptions
+// and headline financials (budget/spend/forecast), which live in
+// structured tables the context doc's own text doesn't repeat but are
+// exactly the kind of "strategy outcomes vs. finance" detail worth
+// comparing across themes. Themes without a context doc yet are simply
 // not included; nothing to link from.
 async function buildProfiles(orgId: string): Promise<Profile[]> {
   const events = await prisma.rawIngestionEvent.findMany({
     where: {
       source: "CONTEXT_DOC",
-      summary: { not: null },
       OR: [{ tracker: { orgId } }, { domain: { orgId } }],
     },
-    select: { id: true, summary: true, trackerId: true, domainId: true, tracker: { select: { name: true } }, domain: { select: { name: true } } },
+    select: {
+      id: true,
+      summary: true,
+      rawText: true,
+      trackerId: true,
+      domainId: true,
+      tracker: { select: { name: true, strategyInsights: { select: { title: true, description: true } }, budget: true, spend: true, forecast: true } },
+      domain: { select: { name: true } },
+    },
   });
 
   return events
     .map((e): Profile | null => {
-      if (e.trackerId && e.tracker) return { eventId: e.id, targetType: "TRACKER", targetId: e.trackerId, name: e.tracker.name, summary: e.summary! };
-      if (e.domainId && e.domain) return { eventId: e.id, targetType: "DOMAIN", targetId: e.domainId, name: e.domain.name, summary: e.summary! };
+      const noteText = e.rawText ?? e.summary ?? "";
+      if (!noteText) return null;
+
+      if (e.trackerId && e.tracker) {
+        const strategyLines = e.tracker.strategyInsights
+          .map((s) => `- ${s.title}${s.description ? `: ${s.description}` : ""}`)
+          .join("\n");
+        const financials = [
+          e.tracker.budget != null ? `Budget: $${e.tracker.budget}` : null,
+          e.tracker.spend != null ? `Spend: $${e.tracker.spend}` : null,
+          e.tracker.forecast != null ? `Forecast: $${e.tracker.forecast}` : null,
+        ].filter(Boolean).join(", ");
+
+        const enriched = [
+          noteText,
+          strategyLines ? `\n\nStrategy outcomes:\n${strategyLines}` : "",
+          financials ? `\n\nFinancials: ${financials}` : "",
+        ].join("");
+        return { eventId: e.id, targetType: "TRACKER", targetId: e.trackerId, name: e.tracker.name, summary: enriched };
+      }
+      if (e.domainId && e.domain) return { eventId: e.id, targetType: "DOMAIN", targetId: e.domainId, name: e.domain.name, summary: noteText };
       return null;
     })
     .filter((p): p is Profile => p !== null);
@@ -193,10 +237,22 @@ export async function rebuildConceptualMentions(orgId: string): Promise<{ count:
       continue;
     }
 
+    // Gemini has, in practice, ignored the skill's "don't force connections"
+    // instruction and returned a connection to nearly every other theme at
+    // 80-98% confidence — i.e. everything connects to everything, which is
+    // exactly the generic-noise failure mode the skill explicitly warns
+    // against. A prompt already failed to prevent this once, so enforce it
+    // in code: require genuinely high confidence, and cap to the single
+    // strongest connection — a theme has at most one standout thematic
+    // relative, not four.
     const validIds = new Set(others.map((o) => o.targetId));
-    for (const conn of result.data.connections) {
-      const target = others.find((o) => o.targetId === conn.targetId);
-      if (!target || !validIds.has(conn.targetId)) continue; // drop hallucinated ids rather than crash the run
+    const strongConnections = result.data.connections
+      .filter((c) => c.confidence >= 92 && validIds.has(c.targetId))
+      .sort((a, b) => b.confidence - a.confidence)
+      .slice(0, 1);
+
+    for (const conn of strongConnections) {
+      const target = others.find((o) => o.targetId === conn.targetId)!;
 
       await prisma.entityMention.create({
         data: {

@@ -14,6 +14,15 @@ that area.
   matches the gap's subject. If no stakeholder is a clear, confident match,
   omit `stakeholderId` entirely rather than guessing — it will fall back to
   the tracker's primary stakeholder.
+- Each gap is tagged with its pattern in brackets, e.g. `[MISSING_STRATEGY]`
+  or `[MISSING_TACTIC]` — use it to route correctly: `MISSING_STRATEGY`
+  concerns the tracker's overall strategy/OKRs and should go to whoever owns
+  strategy (usually the primary stakeholder), while `MISSING_TACTIC`
+  concerns one specific execution tactic and should go to whoever owns THAT
+  tactic's delivery, not the strategy owner by default — check the
+  stakeholder list's `ownsWhat` for a match to the specific tactic/
+  micro-battle named in the gap before falling back to the primary
+  stakeholder.
 - Keep each question to 1-2 sentences.
 - Reference the specific item by name (the risk title, the decision, the
   field) so the recipient immediately understands what is being asked

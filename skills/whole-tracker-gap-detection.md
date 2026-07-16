@@ -10,3 +10,7 @@ Reads a tracker's entire current context — strategy goals, OKRs, every micro-b
 - Ground every gap in what's actually recorded — never invent a missing item that isn't genuinely absent from the supplied data.
 - Cap yourself at the 3-5 most material gaps, not an exhaustive list — this feeds directly into stakeholder questions, and asking about everything at once is worse than asking about what matters most.
 - For each gap, write a `targetSummary` (short, human-readable pointer — e.g. "OKR: Cost synergy 20% YoY — no aligned execution tactic found") and a `rationale` (why this is a genuine gap, one sentence).
+- Classify every gap as exactly one `gapType`:
+  - `MISSING_STRATEGY` — a strategic goal, OKR, or overall narrative element that should exist but has no coverage at all (e.g. an OKR with zero aligned tactics, a stated strategic priority with no strategy card addressing it).
+  - `MISSING_TACTIC` — execution-level: a tactic that should exist but doesn't, or an existing tactic with no outcome insight recorded despite being marked Done.
+  These are entirely different from confusion about content that DOES exist (that's skills/detect-clarifications.md's job) — only use this skill for things genuinely absent. Get the classification right: it determines which stakeholder gets asked (strategy owner vs. that specific tactic's owner), so a MISSING_TACTIC misclassified as MISSING_STRATEGY will get routed to the wrong person.

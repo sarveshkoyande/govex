@@ -42,8 +42,12 @@ export const SUGGESTION_STATUS = ["PENDING", "APPROVED", "REJECTED"] as const;
 export const SYNTHESIS_RUN_STATUS = ["RUNNING", "COMPLETE", "FAILED"] as const;
 
 // Stage 3 — curiosity loop
-// Rule-based ("problem") patterns, from lib/gaps.ts:
-export const GAP_PATTERN = ["STALE_FIELD", "NO_MITIGATION", "MISSING_RATIONALE", "AI_WHOLE_TRACKER_GAP"] as const;
+// Rule-based ("problem") patterns, from lib/gaps.ts. MISSING_STRATEGY and
+// MISSING_TACTIC (from lib/wholeTrackerGaps.ts) replace the old blanket
+// "AI_WHOLE_TRACKER_GAP" — a missing strategic goal/OKR and a missing
+// execution tactic get asked about separately since they route to
+// different stakeholders (strategy owner vs. that tactic's owner).
+export const GAP_PATTERN = ["STALE_FIELD", "NO_MITIGATION", "MISSING_RATIONALE", "MISSING_STRATEGY", "MISSING_TACTIC"] as const;
 // Gemini-detected ("clarification") patterns — the model flags its own
 // confusion during synthesis, from lib/synthesis.ts + skills/detect-clarifications.md:
 export const CLARIFICATION_PATTERN = ["CONTRADICTION", "UNDEFINED_TERM", "UNCLEAR_OWNERSHIP", "UNCLEAR_CONCEPT"] as const;

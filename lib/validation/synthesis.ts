@@ -27,6 +27,13 @@ export const strategySuggestionSchema = z.object({
 // distinct from the rule-based gaps in lib/gaps.ts. See skills/detect-clarifications.md.
 export const clarificationSchema = z.object({
   confusionType: z.enum(CLARIFICATION_PATTERN),
+  // Which layer the confusion is actually about — orthogonal to
+  // confusionType. A CONTRADICTION about the strategic goal and a
+  // CONTRADICTION about one execution tactic go to different stakeholders
+  // (strategy owner vs. that tactic's owner), so this is what lets the model
+  // reason about the right stakeholderId instead of defaulting to the
+  // primary stakeholder for everything.
+  scope: z.enum(["STRATEGY", "TACTIC"]),
   topic: z.string().min(1),
   question: z.string().min(1),
   rationale: z.string().optional().default(""),
@@ -38,6 +45,9 @@ export const clarificationSchema = z.object({
 // Separate from the rule-based Gap in lib/gaps.ts, but both get mapped into
 // that same shape before feeding the shared dedupe/draft/send pipeline.
 export const wholeTrackerGapSchema = z.object({
+  // A missing strategic goal/OKR and a missing execution tactic are asked
+  // about separately — see lib/enums.ts GAP_PATTERN comment.
+  gapType: z.enum(["MISSING_STRATEGY", "MISSING_TACTIC"]),
   targetSummary: z.string().min(1),
   rationale: z.string().min(1),
 });

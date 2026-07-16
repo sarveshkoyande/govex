@@ -7,9 +7,11 @@ import { prisma } from "@/lib/db";
 // needs arise — don't build speculative detectors.
 
 export interface Gap {
-  // AI_WHOLE_TRACKER_GAP comes from lib/wholeTrackerGaps.ts — a separate,
-  // broader-reasoning agent that feeds this same Gap shape and pipeline.
-  pattern: "STALE_FIELD" | "NO_MITIGATION" | "MISSING_RATIONALE" | "AI_WHOLE_TRACKER_GAP";
+  // MISSING_STRATEGY/MISSING_TACTIC come from lib/wholeTrackerGaps.ts — a
+  // separate, broader-reasoning agent that feeds this same Gap shape and
+  // pipeline. Kept as two distinct patterns (not one blanket "AI gap") so
+  // lib/questions.ts can route each to the right kind of stakeholder.
+  pattern: "STALE_FIELD" | "NO_MITIGATION" | "MISSING_RATIONALE" | "MISSING_STRATEGY" | "MISSING_TACTIC";
   targetSummary: string;
   rationale: string;
 }

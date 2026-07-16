@@ -11,7 +11,27 @@ export type RunSynthesisResult =
   | { ok: true; runId: string; suggestionCount: number; clarificationCount: number }
   | { ok: false; error: string };
 
+// Post-merger/acquisition-integration trackers get an extra framework skill
+// (7S) beyond the standard synthesis set — SWOT/OKR-alignment ask "is this
+// theme winning," 7S specifically asks "is the acquired practice fusing
+// into the parent firm's operating model," which is the actual shape of
+// BioPharm & Media Integration. Hardcoded to this one tracker rather than a
+// generic "engagement type" field, since that's a real schema decision (new
+// Tracker.engagementType enum, UI to set it, etc.) beyond what's needed for
+// the one integration tracker that currently exists.
+const SEVEN_S_TRACKER_IDS = new Set(["cmr4dpdfm000q3mcwogtweqqk"]); // BioPharm & Media Integration
+// PAVE is an ongoing performance-based partnership, not an integration or a
+// pre-deal sourcing decision — a JV marketing lifecycle lens (Pfizer as
+// Product Company, Indegene as Service Company) fits its actual operational
+// mechanics (DRE/PDE attribution, Gross Margin Share, baseline/true-up)
+// better than a generic alliance-health check. alliance-health-pfizer-pave
+// stays registered and chat-selectable as a secondary lens, just not
+// auto-wired into every synthesis run. Same hardcoded-per-tracker approach
+// as SEVEN_S_TRACKER_IDS above.
+const JV_LIFECYCLE_TRACKER_IDS = new Set(["cmr4dpdga005o3mcw03ac0277"]); // Pfizer PAVE Collaboration
+
 function buildPrompt(input: {
+  trackerId: string;
   trackerName: string;
   strategyGoals: string[];
   okrs: { title: string; metrics: string | null }[];
@@ -20,7 +40,13 @@ function buildPrompt(input: {
   stakeholders: { id: string; name: string; ownsWhat: string | null }[];
   events: { id: string; source: string; subject: string | null; occurredAt: string; rawText: string }[];
 }): string {
-  const skills = loadSkills(["tracker-synthesis", "tactic-insight-extraction", "detect-clarifications"]);
+  const skillNames = ["tracker-synthesis", "tactic-insight-extraction", "detect-clarifications"] as const;
+  const extraSkill = SEVEN_S_TRACKER_IDS.has(input.trackerId)
+    ? (["framework-7s-biopharm"] as const)
+    : JV_LIFECYCLE_TRACKER_IDS.has(input.trackerId)
+      ? (["jv-marketing-lifecycle-pfizer-pave"] as const)
+      : ([] as const);
+  const skills = loadSkills([...skillNames, ...extraSkill]);
 
   return `You are the GovEx synthesis engine. Apply the skills below to the supplied tracker context and raw events, then return ONLY a single JSON object matching the schema at the end. Do not include markdown fences or any text outside the JSON object.
 
@@ -54,7 +80,7 @@ ${input.events.map((e) => `[id="${e.id}" source=${e.source} subject="${e.subject
 {
   "strategyInsights": [ { "title": string, "text": string, "signal": "RISK"|"WATCH"|"ON_TRACK"|"OPPORTUNITY"|"NONE", "confidence": number (0-100), "rationale": string, "sourceEventIds": string[] } ],
   "tacticInsights": [ { "tacticId": string, "kind": "TACTIC_EXECUTION"|"TACTIC_OUTCOME", "text": string, "signal": "RISK"|"WATCH"|"ON_TRACK"|"OPPORTUNITY"|"NONE", "confidence": number (0-100), "rationale": string, "sourceEventIds": string[] } ],
-  "clarifications": [ { "confusionType": "CONTRADICTION"|"UNDEFINED_TERM"|"UNCLEAR_OWNERSHIP"|"UNCLEAR_CONCEPT", "topic": string, "question": string, "rationale": string, "sourceEventIds": string[], "stakeholderId": string (optional) } ]
+  "clarifications": [ { "confusionType": "CONTRADICTION"|"UNDEFINED_TERM"|"UNCLEAR_OWNERSHIP"|"UNCLEAR_CONCEPT", "scope": "STRATEGY"|"TACTIC", "topic": string, "question": string, "rationale": string, "sourceEventIds": string[], "stakeholderId": string (optional) } ]
 }`;
 }
 
@@ -102,6 +128,7 @@ export async function runSynthesis(trackerId: string, orgId: string, triggeredBy
   });
 
   const prompt = buildPrompt({
+    trackerId,
     trackerName: tracker.name,
     strategyGoals: tracker.strategyGoals.map((g) => g.text),
     okrs: tracker.okrs.map((o) => ({ title: o.title, metrics: o.metrics })),
