@@ -3,6 +3,7 @@ import Link from "next/link";
 import { ArrowLeft, Pencil, History, Inbox, FlaskConical, Mail, Users2, Sparkles } from "lucide-react";
 import GenerateInsightsButton from "@/components/synthesis/GenerateInsightsButton";
 import DraftQuestionsButton from "@/components/synthesis/DraftQuestionsButton";
+import SyncDriveButton from "@/components/trackers/SyncDriveButton";
 import OpenQuestionsPanel, { type QuestionRow } from "@/components/synthesis/OpenQuestionsPanel";
 import { getSessionUser, canWrite } from "@/lib/rbac";
 import { prisma } from "@/lib/db";
@@ -145,6 +146,7 @@ export default async function TrackerDetail({ params }: { params: Promise<{ id: 
           )}
           {writable && <GenerateInsightsButton trackerId={t.id} />}
           {writable && <DraftQuestionsButton trackerId={t.id} />}
+          {writable && <SyncDriveButton trackerId={t.id} />}
           {writable && (
             <Link href={`/trackers/${t.id}/ingest-test`} className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-card px-3 py-1.5 text-xs font-semibold text-foreground hover:bg-muted">
               <FlaskConical size={13} /> Test Ingestion

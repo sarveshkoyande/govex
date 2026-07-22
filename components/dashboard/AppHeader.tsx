@@ -1,6 +1,6 @@
 "use client";
 
-import { Bell, CalendarDays, LogOut, ChevronDown, KeyRound, Send, BarChart3, BookOpen } from "lucide-react";
+import { Bell, CalendarDays, LogOut, ChevronDown, KeyRound, Send, BarChart3, BookOpen, RefreshCw } from "lucide-react";
 import { useState, useRef, useEffect } from "react";
 import { createPortal } from "react-dom";
 import Link from "next/link";
@@ -99,6 +99,20 @@ export default function AppHeader({ userName, userEmail, role }: AppHeaderProps)
           >
             <Send size={13} />
             Outbound Webhook
+          </Link>
+        )}
+        {role === "SYSTEM_ADMIN" && (
+          <Link
+            href="/settings/drive-sync-webhook"
+            role="menuitem"
+            onClick={() => setMenuOpen(false)}
+            style={{
+              width: "100%", display: "flex", alignItems: "center", gap: 8, padding: "12px 16px",
+              color: "oklch(1 0 0 / 0.85)", fontSize: 12, borderBottom: "1px solid oklch(1 0 0 / 0.10)",
+            }}
+          >
+            <RefreshCw size={13} />
+            Drive Sync Webhook
           </Link>
         )}
         {role === "SYSTEM_ADMIN" && (

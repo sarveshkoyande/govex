@@ -36,6 +36,7 @@ model Organization {
   trackers          Tracker[]
   ingestionApiKeys  IngestionApiKey[]
   outboundWebhook   OutboundWebhookConfig?
+  driveSyncConfig   DriveSyncConfig?
   chatSessions      ChatSession[]
   insightFeedback   InsightFeedback[]
   skillPatchProposals SkillPatchProposal[]
@@ -394,6 +395,14 @@ model Tracker {
 
   overallConfidence Int @default(50) // 0-100
 
+  // The pull-sync cursor for lib/driveSync.ts — "since" is sent to the org's
+  // DriveSyncConfig flow so it only lists files modified after this point.
+  // Set optimistically to the trigger time when the sync is kicked off, not
+  // when the flow finishes (we don't get a completion callback) — accepts a
+  // small race window (a file saved in the few seconds mid-sync could be
+  // missed until the next click) as the deliberate simple tradeoff here.
+  driveLastSyncedAt DateTime?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   createdBy String?
@@ -711,6 +720,29 @@ model AiSuggestion {
 // ===========================================================================
 
 model OutboundWebhookConfig {
+  id     String  @id @default(cuid())
+  orgId  String  @unique
+  url    String
+  secret String? // sent as `Authorization: Bearer <secret>` to the receiving flow
+  active Boolean @default(true)
+
+  updatedAt  DateTime @updatedAt
+  updatedBy  String?
+  lastUsedAt DateTime?
+  lastStatus String?  // SUCCESS | FAILED
+  lastError  String?
+
+  org Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+}
+
+// A second, separate outbound webhook from OutboundWebhookConfig — that one
+// points at the "post a question to Teams" flow; this one points at a
+// different Power Automate flow that lists/fetches files from a OneDrive
+// folder and POSTs them to /api/ingest. Deliberately its own row (not a
+// second URL bolted onto OutboundWebhookConfig) since they're triggered by
+// different things (a drafted question vs. a user clicking "Sync OneDrive")
+// and can fail/be reconfigured independently.
+model DriveSyncConfig {
   id     String  @id @default(cuid())
   orgId  String  @unique
   url    String
