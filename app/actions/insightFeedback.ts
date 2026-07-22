@@ -1,6 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { after } from "next/server";
 import { prisma } from "@/lib/db";
 import { getSessionUser, canWrite } from "@/lib/rbac";
 
@@ -51,10 +52,13 @@ export async function voteInsight(
   if (vote === "DOWN") {
     patchDrafting = true;
     // Fire-and-forget — drafting a patch is a Gemini call that shouldn't
-    // block the vote itself from registering.
-    import("@/lib/skillPatch").then(({ draftSkillPatch }) => draftSkillPatch(feedback.id)).catch((err) => {
-      console.error("[voteInsight] background patch drafting failed for", feedback.id, err);
-    });
+    // block the vote itself from registering. after() keeps it running past
+    // the response on serverless (Vercel), not just on a persistent server.
+    after(() =>
+      import("@/lib/skillPatch").then(({ draftSkillPatch }) => draftSkillPatch(feedback.id)).catch((err) => {
+        console.error("[voteInsight] background patch drafting failed for", feedback.id, err);
+      }),
+    );
   }
 
   revalidatePath(`/trackers/${trackerId}`);

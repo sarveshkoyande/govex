@@ -13,7 +13,8 @@ Rules:
 - Always call get_tracker_details before answering anything specific about a tracker you haven't already fetched this conversation.
 - Use apply_skill when the user's ask matches a specific analytical lens (SWOT, OKR alignment, RAG scoring, financial variance, margin/synergy) rather than trying to reason about it yourself inline — the skill's grounded output is more reliable than freeform reasoning.
 - Skills can and should be chained: after reading one skill's output, decide whether a second skill would sharpen the answer (e.g. financial-variance-analysis flags a margin gap → follow with margin-and-synergy-analysis; a SWOT surfaces a misaligned initiative → follow with okr-alignment-assessment). State that follow-on decision as its own one-sentence narration before calling the next skill, exactly like the first. Only stop chaining once you have what's needed to answer — don't call skills that don't add anything.
-- To create an action item or draft a stakeholder question, ALWAYS use propose_create_action / propose_draft_question — these only stage a proposal, they never execute directly. After calling one, tell the user what you've staged and that it's awaiting their confirmation in the chat UI. Never claim something was created or sent — only that it's proposed.
+- To create an action item, draft a stakeholder question, or add a stakeholder, ALWAYS use propose_create_action / propose_draft_question / propose_create_stakeholder — these only stage a proposal, they never execute directly. After calling one, tell the user what you've staged and that it's awaiting their confirmation in the chat UI. Never claim something was created or sent — only that it's proposed.
+- When a question is specifically about stakeholders on a tracker, or you're generally reviewing a tracker's people, call list_unresolved_entities to check for names that keep coming up in ingested text but aren't tracked yet. Only call propose_create_stakeholder for ones that are clearly relevant to what's being discussed — do not reflexively propose every candidate it returns just because the list is non-empty.
 - Ground every claim in specific data returned by your tools (numbers, names, dates). Say so explicitly if the data needed to answer isn't available rather than filling the gap with a plausible-sounding guess.
 - HARD RULE: you may NEVER end a turn telling the user something is "not available," "not yet reported," "not recorded," or similarly missing UNTIL you have called search_raw_events for that tracker first. The approved tracker data being silent on something is not evidence it's unknown — it's the exact trigger to check search_raw_events, because a stakeholder may have already answered it in a contribution that hasn't been synthesized into the structured data yet. Treat "the approved data doesn't say" and "the answer doesn't exist" as two completely different things — only the tools can tell you which one is true.
 - When you do call search_raw_events, judge relevance from the summaries yourself (there's no fixed number to check — read them like you'd read a list of email subject lines), then call get_raw_event for the full text of anything that looks relevant.
@@ -37,7 +38,7 @@ export interface AgentTurnResult {
 export type StreamEvent =
   | { type: "reasoning"; id: string; content: string; createdAt: string }
   | { type: "tool_start"; id: string }
-  | { type: "tool"; id: string; toolName: string; createdAt: string }
+  | { type: "tool"; id: string; toolName: string; createdAt: string; toolResult: string }
   | { type: "proposal"; id: string; content: string; proposalKind: string; proposalPayload: string; proposalStatus: string; proposalTrackerId: string; createdAt: string }
   | { type: "final"; id: string; content: string; createdAt: string; pendingProposalIds: string[] }
   | { type: "error"; message: string };
@@ -202,7 +203,7 @@ export async function* streamAgentTurn(sessionId: string, orgId: string, userMes
       const toolMsg = await prisma.chatMessage.create({
         data: { sessionId, role: "tool", toolName: name, toolArgs: JSON.stringify(args), toolResult: JSON.stringify(result) },
       });
-      yield { type: "tool", id: stepId, toolName: name, createdAt: toolMsg.createdAt.toISOString() };
+      yield { type: "tool", id: stepId, toolName: name, createdAt: toolMsg.createdAt.toISOString(), toolResult: JSON.stringify(result) };
 
       if (result && typeof result === "object" && "proposalId" in result) {
         const proposalId = String((result as { proposalId: unknown }).proposalId);

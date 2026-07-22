@@ -6,7 +6,13 @@ import { verifyIngestionToken, ingestEvent } from "@/lib/ingestion";
 //   Authorization: Bearer <org ingestion token>
 //   Content-Type: application/json
 //   body: { trackerId, source, sourceSystem, subject?, fromAddress?,
-//            participants?, occurredAt?, rawText, rawPayload? }
+//            participants?, occurredAt?, rawPayload?,
+//            EITHER rawText (plain text, e.g. Teams/email)
+//            OR fileName + fileBase64 (a file — txt/md/docx/pdf/pptx — for
+//              the server to extract text from itself; see lib/fileExtraction.ts.
+//              This is the shape for a Power Automate "when a file is
+//              created/modified in a OneDrive/SharePoint folder" flow: get
+//              the file content, base64-encode it, POST it here.) }
 // This is a machine-to-machine endpoint — it authenticates via the bearer
 // token (see IngestionApiKey), not the browser session cookie.
 export async function POST(req: Request) {

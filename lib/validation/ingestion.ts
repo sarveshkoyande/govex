@@ -16,12 +16,20 @@ export const ingestionPayloadSchema = z
     fromAddress: z.string().optional(),
     participants: z.string().optional(),
     occurredAt: z.string().datetime().optional(), // ISO 8601; defaults to now if omitted
-    rawText: z.string().min(1, "rawText required"),
+    // Either rawText directly (existing Teams/email path), or a file for the
+    // server to extract text from itself (Power Automate OneDrive/SharePoint
+    // path — see lib/fileExtraction.ts). Never both.
+    rawText: z.string().min(1).optional(),
+    fileName: z.string().min(1).optional(), // e.g. "Weekly Sync Notes.docx" — extension picks the extractor
+    fileBase64: z.string().min(1).optional(), // raw file bytes, base64-encoded
     rawPayload: z.unknown().optional(), // arbitrary original payload, stored serialized
     // Stage 3 — optional. When set, this event is treated as a stakeholder's
     // reply to that OpenQuestion (must be ASKED and belong to the same tracker).
     answersQuestionId: z.string().optional(),
   })
-  .refine((v) => !!v.trackerId || !!v.domainId, { message: "trackerId or domainId required" });
+  .refine((v) => !!v.trackerId || !!v.domainId, { message: "trackerId or domainId required" })
+  .refine((v) => !!v.rawText || (!!v.fileName && !!v.fileBase64), {
+    message: "Either rawText, or both fileName and fileBase64, are required",
+  });
 
 export type IngestionPayload = z.infer<typeof ingestionPayloadSchema>;

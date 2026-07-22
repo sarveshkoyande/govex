@@ -10,7 +10,8 @@ import {
   type ChatMessageView,
 } from "@/app/actions/chat";
 import type { StreamEvent } from "@/lib/agent";
-import { MessageCircle, X, Send, Loader2, Check, Ban, Sparkles, Plus, Brain, ChevronRight } from "lucide-react";
+import { frameworkOutputSchema, type FrameworkOutput } from "@/lib/validation/framework";
+import { MessageCircle, X, Send, Loader2, Check, Ban, Sparkles, Plus, Brain, ChevronRight, LayoutGrid, TriangleAlert } from "lucide-react";
 
 // Assistant replies come back as markdown (bold, bullets) — render them
 // properly instead of dumping raw asterisks. Kept to a minimal element set
@@ -58,6 +59,82 @@ function ReasoningBubble({ content }: { content: string }) {
   );
 }
 
+// statusTone -> color. "risk"/"negative" both read as warm/urgent but at two
+// intensities (amber vs red) so a framework's AT-RISK and outright-failing
+// calls stay visually distinct at a glance.
+const TONE_STYLES: Record<FrameworkOutput["elements"][number]["statusTone"], string> = {
+  positive: "bg-emerald-100 text-emerald-700 border-emerald-200",
+  risk: "bg-amber-100 text-amber-700 border-amber-200",
+  negative: "bg-red-100 text-red-700 border-red-200",
+  neutral: "bg-muted text-muted-foreground border-border",
+};
+
+// The structured, per-element card that's the actual proof a framework skill
+// walked every element it defines — rather than trusting prose that merely
+// sounds like it did. See lib/agentTools.ts applySkillTool / lib/validation/framework.ts.
+function FrameworkCard({ output, skillApplied }: { output: FrameworkOutput; skillApplied?: string }) {
+  return (
+    <div className="flex flex-col gap-2 rounded-xl border border-border bg-card p-3">
+      <p className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wide text-primary">
+        <LayoutGrid size={11} /> {output.frameworkName}
+      </p>
+      <div className="flex flex-col gap-1.5">
+        {output.elements.map((el, i) => (
+          <div key={i} className="flex flex-col gap-1 rounded-lg border border-border/60 bg-muted/20 p-2">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs font-semibold text-foreground">{el.name}</span>
+              <span className={cn("shrink-0 rounded-full border px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide", TONE_STYLES[el.statusTone])}>
+                {el.statusLabel}
+              </span>
+            </div>
+            <p className="text-[11px] leading-snug text-muted-foreground">{el.evidence}</p>
+          </div>
+        ))}
+      </div>
+      <div className="rounded-lg bg-primary/[0.06] px-2.5 py-1.5">
+        <p className="text-[10px] font-bold uppercase tracking-wide text-primary">So what</p>
+        <p className="text-xs leading-snug text-foreground">{output.soWhat}</p>
+      </div>
+      {skillApplied && <p className="text-right text-[9px] text-muted-foreground">via {skillApplied}</p>}
+    </div>
+  );
+}
+
+// Fallback when a framework skill's structured JSON failed zod validation —
+// visually distinct (amber, flagged) from FrameworkCard so it's never
+// mistaken for the verified per-element breakdown.
+function UnstructuredFrameworkCard({ analysis, skillApplied }: { analysis: string; skillApplied?: string }) {
+  return (
+    <div className="flex flex-col gap-1.5 rounded-xl border border-amber-200 bg-amber-50 p-3">
+      <p className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wide text-amber-700">
+        <TriangleAlert size={11} /> {skillApplied ?? "Framework"} — unstructured fallback
+      </p>
+      <MarkdownBubble content={analysis} />
+    </div>
+  );
+}
+
+// Tries to read a framework-skill tool result out of a "tool" message's
+// toolResult JSON. Returns null for every other tool call (search_trackers,
+// get_tracker_details, non-framework apply_skill, propose_*, etc.), which
+// keeps rendering as the generic Fetched line.
+function parseFrameworkResult(toolResult: string | null): { framework?: FrameworkOutput; analysis?: string; skillApplied?: string; structuredOutputFailed?: boolean } | null {
+  if (!toolResult) return null;
+  try {
+    const parsed = JSON.parse(toolResult);
+    if (parsed?.framework) {
+      const result = frameworkOutputSchema.safeParse(parsed.framework);
+      if (result.success) return { framework: result.data, skillApplied: parsed.skillApplied };
+    }
+    if (parsed?.structuredOutputFailed && typeof parsed.analysis === "string") {
+      return { analysis: parsed.analysis, skillApplied: parsed.skillApplied, structuredOutputFailed: true };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 function ProposalCard({ msg, onResolved }: { msg: ChatMessageView; onResolved: (id: string, status: string, summary?: string) => void }) {
   const [pending, startTransition] = useTransition();
   const payload = msg.proposalPayload ? JSON.parse(msg.proposalPayload) : {};
@@ -78,14 +155,20 @@ function ProposalCard({ msg, onResolved }: { msg: ChatMessageView; onResolved: (
     });
   }
 
+  const kindLabel = msg.proposalKind === "CREATE_ACTION" ? "Proposed Action" : msg.proposalKind === "CREATE_STAKEHOLDER" ? "Proposed Stakeholder" : "Proposed Question";
+  const bodyText = msg.proposalKind === "CREATE_ACTION" ? payload.title : msg.proposalKind === "CREATE_STAKEHOLDER" ? payload.name : payload.questionText;
+
   return (
     <div className="flex flex-col gap-2 rounded-xl border border-primary/30 bg-primary/[0.04] p-3">
       <p className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wide text-primary">
-        <Sparkles size={11} /> {msg.proposalKind === "CREATE_ACTION" ? "Proposed Action" : "Proposed Question"}
+        <Sparkles size={11} /> {kindLabel}
       </p>
-      <p className="text-xs text-foreground">
-        {msg.proposalKind === "CREATE_ACTION" ? payload.title : payload.questionText}
-      </p>
+      <p className="text-xs text-foreground">{bodyText}</p>
+      {msg.proposalKind === "CREATE_STAKEHOLDER" && (payload.roleOnTracker || payload.ownsWhat) && (
+        <p className="text-[10px] text-muted-foreground">
+          {[payload.roleOnTracker, payload.ownsWhat].filter(Boolean).join(" · ")}
+        </p>
+      )}
       {msg.proposalStatus === "PENDING" ? (
         <div className="flex items-center gap-2">
           <Button size="sm" onClick={confirm} disabled={pending}><Check size={12} /> Confirm</Button>
@@ -108,12 +191,25 @@ function MessageBubble({ msg, onResolved }: { msg: ChatMessageView; onResolved: 
   if (msg.role === "tool") {
     // DB-loaded history (batch path) has no toolStatus at all — it's always
     // already resolved by the time it's fetched, so treat missing as "done".
-    // Deliberately generic ("Fetching…"/"Fetched") — never names the tool.
     const status = (msg as LocalChatMessage).toolStatus ?? "done";
+    if (status === "pending") {
+      return (
+        <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+          <Loader2 size={10} className="animate-spin" /> Fetching…
+        </div>
+      );
+    }
+
+    // Framework-skill results get the structured card; every other tool call
+    // (search_trackers, get_tracker_details, non-framework apply_skill,
+    // search_raw_events, get_raw_event) stays the generic, tool-name-free line.
+    const parsed = parseFrameworkResult(msg.toolResult);
+    if (parsed?.framework) return <FrameworkCard output={parsed.framework} skillApplied={parsed.skillApplied} />;
+    if (parsed?.structuredOutputFailed && parsed.analysis) return <UnstructuredFrameworkCard analysis={parsed.analysis} skillApplied={parsed.skillApplied} />;
+
     return (
       <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
-        {status === "pending" ? <Loader2 size={10} className="animate-spin" /> : <Check size={10} />}
-        {status === "pending" ? "Fetching…" : "Fetched"}
+        <Check size={10} /> Fetched
       </div>
     );
   }
@@ -141,11 +237,11 @@ type LocalChatMessage = ChatMessageView & { toolStatus?: "pending" | "done" };
 function eventToMessage(ev: StreamEvent): LocalChatMessage | null {
   switch (ev.type) {
     case "reasoning":
-      return { id: ev.id, role: "reasoning", content: ev.content, toolName: null, proposalKind: null, proposalPayload: null, proposalStatus: null, proposalTrackerId: null, createdAt: ev.createdAt };
+      return { id: ev.id, role: "reasoning", content: ev.content, toolName: null, toolResult: null, proposalKind: null, proposalPayload: null, proposalStatus: null, proposalTrackerId: null, createdAt: ev.createdAt };
     case "proposal":
-      return { id: ev.id, role: "assistant", content: ev.content, toolName: null, proposalKind: ev.proposalKind, proposalPayload: ev.proposalPayload, proposalStatus: ev.proposalStatus, proposalTrackerId: ev.proposalTrackerId, createdAt: ev.createdAt };
+      return { id: ev.id, role: "assistant", content: ev.content, toolName: null, toolResult: null, proposalKind: ev.proposalKind, proposalPayload: ev.proposalPayload, proposalStatus: ev.proposalStatus, proposalTrackerId: ev.proposalTrackerId, createdAt: ev.createdAt };
     case "final":
-      return { id: ev.id, role: "assistant", content: ev.content, toolName: null, proposalKind: null, proposalPayload: null, proposalStatus: null, proposalTrackerId: null, createdAt: ev.createdAt };
+      return { id: ev.id, role: "assistant", content: ev.content, toolName: null, toolResult: null, proposalKind: null, proposalPayload: null, proposalStatus: null, proposalTrackerId: null, createdAt: ev.createdAt };
     default:
       return null;
   }
@@ -179,7 +275,7 @@ export default function ChatWidget() {
     if (!sessionId || !input.trim() || loading) return;
     const text = input.trim();
     setInput("");
-    setMessages((prev) => [...prev, { id: `optimistic-${Date.now()}`, role: "user", content: text, toolName: null, proposalKind: null, proposalPayload: null, proposalStatus: null, proposalTrackerId: null, createdAt: new Date().toISOString() }]);
+    setMessages((prev) => [...prev, { id: `optimistic-${Date.now()}`, role: "user", content: text, toolName: null, toolResult: null, proposalKind: null, proposalPayload: null, proposalStatus: null, proposalTrackerId: null, createdAt: new Date().toISOString() }]);
     setLoading(true);
     try {
       const res = await fetch("/api/chat/stream", {
@@ -207,14 +303,14 @@ export default function ChatWidget() {
           if (ev.type === "error") { toast.error(ev.message); continue; }
           if (ev.type === "tool_start") {
             setMessages((prev) => [...prev, {
-              id: ev.id, role: "tool", content: null, toolName: null, proposalKind: null,
+              id: ev.id, role: "tool", content: null, toolName: null, toolResult: null, proposalKind: null,
               proposalPayload: null, proposalStatus: null, proposalTrackerId: null,
               createdAt: new Date().toISOString(), toolStatus: "pending",
             }]);
             continue;
           }
           if (ev.type === "tool") {
-            setMessages((prev) => prev.map((m) => (m.id === ev.id ? { ...m, toolStatus: "done" } : m)));
+            setMessages((prev) => prev.map((m) => (m.id === ev.id ? { ...m, toolStatus: "done", toolResult: ev.toolResult } : m)));
             continue;
           }
           const msg = eventToMessage(ev);
@@ -240,7 +336,7 @@ export default function ChatWidget() {
   function onResolved(id: string, status: string, summary?: string) {
     setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, proposalStatus: status } : m)));
     if (summary) {
-      setMessages((prev) => [...prev, { id: `system-${Date.now()}`, role: "assistant", content: summary, toolName: null, proposalKind: null, proposalPayload: null, proposalStatus: null, proposalTrackerId: null, createdAt: new Date().toISOString() }]);
+      setMessages((prev) => [...prev, { id: `system-${Date.now()}`, role: "assistant", content: summary, toolName: null, toolResult: null, proposalKind: null, proposalPayload: null, proposalStatus: null, proposalTrackerId: null, createdAt: new Date().toISOString() }]);
     }
   }
 

@@ -13,6 +13,7 @@ export interface ChatMessageView {
   role: string;
   content: string | null;
   toolName: string | null;
+  toolResult: string | null;
   proposalKind: string | null;
   proposalPayload: string | null;
   proposalStatus: string | null;
@@ -114,6 +115,16 @@ export async function confirmProposal(messageId: string): Promise<ActionResult<{
     });
     const sendResult = await deliverQuestion(created.id, user.email ?? user.id);
     resultSummary = sendResult.status === "SENT" ? "Question sent." : `Question created (delivery: ${sendResult.status}).`;
+  } else if (msg.proposalKind === "CREATE_STAKEHOLDER") {
+    await prisma.stakeholder.create({
+      data: {
+        trackerId: msg.proposalTrackerId,
+        name: payload.name,
+        roleOnTracker: payload.roleOnTracker || null,
+        ownsWhat: payload.ownsWhat || null,
+      },
+    });
+    resultSummary = `Added "${payload.name}" as a stakeholder.`;
   } else {
     return { ok: false, error: `Unknown proposal kind "${msg.proposalKind}".` };
   }
@@ -131,12 +142,27 @@ export async function rejectProposal(messageId: string): Promise<ActionResult> {
   const msg = await prisma.chatMessage.findFirst({ where: { id: messageId, session: { orgId: user.orgId } } });
   if (!msg || msg.proposalStatus !== "PENDING") return { ok: false, error: "No pending proposal found." };
 
+  // Rejecting a proposed stakeholder means "don't suggest this name again" —
+  // record it so findPromotableEntityCandidates (lib/entityExtraction.ts)
+  // stops resurfacing it every time it's mentioned again.
+  if (msg.proposalKind === "CREATE_STAKEHOLDER" && msg.proposalTrackerId) {
+    const payload = JSON.parse(msg.proposalPayload ?? "{}");
+    const term = String(payload.name ?? "").toLowerCase().trim();
+    if (term) {
+      await prisma.dismissedEntityCandidate.upsert({
+        where: { trackerId_term: { trackerId: msg.proposalTrackerId, term } },
+        update: {},
+        create: { orgId: user.orgId, trackerId: msg.proposalTrackerId, term },
+      });
+    }
+  }
+
   await prisma.chatMessage.update({ where: { id: messageId }, data: { proposalStatus: "REJECTED" } });
   return { ok: true, data: undefined };
 }
 
 function toView(m: {
-  id: string; role: string; content: string | null; toolName: string | null;
+  id: string; role: string; content: string | null; toolName: string | null; toolResult: string | null;
   proposalKind: string | null; proposalPayload: string | null; proposalStatus: string | null;
   proposalTrackerId: string | null; createdAt: Date;
 }): ChatMessageView {
@@ -145,6 +171,7 @@ function toView(m: {
     role: m.role,
     content: m.content,
     toolName: m.toolName,
+    toolResult: m.toolResult,
     proposalKind: m.proposalKind,
     proposalPayload: m.proposalPayload,
     proposalStatus: m.proposalStatus,

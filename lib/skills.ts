@@ -32,7 +32,8 @@ export type SkillName =
   // appears in the Skills Library UI or is selectable by apply_skill.
   | "skill-patch-drafting"
   | "skill-authoring"
-  | "entity-conceptual-linking";
+  | "entity-conceptual-linking"
+  | "unresolved-entity-classification";
 
 export function loadSkill(name: SkillName): string {
   const file = path.join(SKILLS_DIR, `${name}.md`);

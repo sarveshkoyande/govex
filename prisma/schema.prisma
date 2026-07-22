@@ -11,7 +11,7 @@ generator client {
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
@@ -41,6 +41,7 @@ model Organization {
   skillPatchProposals SkillPatchProposal[]
   customSkills      CustomSkill[]
   entityMentions    EntityMention[]
+  dismissedEntityCandidates DismissedEntityCandidate[]
 }
 
 // Org-scoped skills created live via the Skills Library's "describe a skill"
@@ -216,7 +217,8 @@ model RawIngestionEvent {
   fromAddress  String?  // sender email / meeting organizer
   participants String?  // free-text list of names/emails
   occurredAt   DateTime // when the email was sent / meeting happened
-  rawText      String   // body / transcript / notes, preserved untouched
+  rawText      String   // extracted plain text — body / transcript / notes / file content
+  fileName     String?  // set when this event came from a file (see lib/fileExtraction.ts) — the original name, for traceability; the file bytes themselves are not retained
   rawPayload   String?  // full original JSON payload, serialized, for traceability
   status       String   @default("RECEIVED") // RECEIVED | REVIEWED
   ingestedVia  String   @default("webhook")  // webhook | manual_test
@@ -256,14 +258,20 @@ model EntityMention {
   sourceType String // RAW_EVENT | STRATEGY_INSIGHT | TACTIC_INSIGHT
   sourceId   String
 
-  targetType String  // TRACKER | STAKEHOLDER | TERM
+  targetType String  // TRACKER | STAKEHOLDER | TERM | UNRESOLVED
   targetId   String? // Tracker.id or Stakeholder.id when targetType is TRACKER/STAKEHOLDER
-  targetTerm String? // the literal term/phrase when targetType is TERM (no registry row to point to)
+  targetTerm String? // the literal term/phrase when targetType is TERM or UNRESOLVED (no registry row to point to)
 
-  method     String  // DICTIONARY | CONCEPTUAL
+  // Set only for UNRESOLVED mentions — which tracker the candidate was seen
+  // on, so findPromotableEntityCandidates can group/count per-tracker without
+  // joining back through RawIngestionEvent. Null for every other targetType
+  // (they're reachable via sourceId already).
+  trackerId String?
+
+  method     String  // DICTIONARY | CONCEPTUAL | NER
   contextSnippet String // the sentence/phrase the mention was found in
-  confidence Int     @default(100) // DICTIONARY matches are always 100; CONCEPTUAL matches carry Gemini's own confidence
-  reasoning  String? // CONCEPTUAL only — why the model thinks these are connected
+  confidence Int     @default(100) // DICTIONARY matches are always 100; CONCEPTUAL/NER carry the model's own confidence
+  reasoning  String? // CONCEPTUAL: why the model thinks these are connected. NER: the guessed entity type (PERSON/PROJECT/OTHER).
 
   createdAt DateTime @default(now())
 
@@ -272,6 +280,26 @@ model EntityMention {
   @@index([orgId])
   @@index([sourceType, sourceId])
   @@index([targetType, targetId])
+  @@index([trackerId, targetType])
+}
+
+// A promotable-entity suggestion the user explicitly declined — prevents
+// re-suggesting "Marcus Webb" every time he's mentioned again after the user
+// already said "not a stakeholder" once. Keyed by lowercased term per tracker,
+// deliberately NOT tied to a specific EntityMention row (a dismissal should
+// suppress every past and future mention of that term, not just one).
+model DismissedEntityCandidate {
+  id        String   @id @default(cuid())
+  orgId     String
+  trackerId String
+  term      String // lowercased candidate phrase
+
+  createdAt DateTime @default(now())
+
+  org Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@unique([trackerId, term])
+  @@index([orgId])
 }
 
 model User {

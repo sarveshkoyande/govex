@@ -1,8 +1,9 @@
 import type { FunctionDeclaration } from "@google/genai";
 import { prisma } from "@/lib/db";
 import { loadSkill } from "@/lib/skills";
-import { generateText } from "@/lib/gemini";
+import { generateText, generateJson } from "@/lib/gemini";
 import { SKILL_REGISTRY } from "@/lib/skillRegistry";
+import { frameworkOutputSchema } from "@/lib/validation/framework";
 
 export interface ToolContext {
   orgId: string;
@@ -109,6 +110,29 @@ export async function getAgentToolDeclarations(orgId: string): Promise<FunctionD
       required: ["trackerId", "questionText"],
     },
   },
+  {
+    name: "list_unresolved_entities",
+    description: "List names/projects mentioned repeatedly in this tracker's ingested text that AREN'T yet tracked as a stakeholder — candidates already classified as likely real people/projects, not generic noise. Use this when asked about stakeholders, or after reviewing raw events, to check for a recurring name worth promoting.",
+    parametersJsonSchema: {
+      type: "object",
+      properties: { trackerId: { type: "string" } },
+      required: ["trackerId"],
+    },
+  },
+  {
+    name: "propose_create_stakeholder",
+    description: "Propose adding a new stakeholder to a tracker — typically a name surfaced by list_unresolved_entities that keeps coming up. This does NOT create it yet — it stages a proposal the user must explicitly confirm in the chat UI.",
+    parametersJsonSchema: {
+      type: "object",
+      properties: {
+        trackerId: { type: "string" },
+        name: { type: "string" },
+        roleOnTracker: { type: "string", description: "Optional — their role/title if evident from the source text." },
+        ownsWhat: { type: "string", description: "Optional — the area they seem to own, if evident from the source text." },
+      },
+      required: ["trackerId", "name"],
+    },
+  },
   ];
 }
 
@@ -187,20 +211,74 @@ async function applySkillTool(args: { skillName: string; trackerId: string; focu
   const builtIn = SKILL_REGISTRY.find((s) => s.name === args.skillName);
   let skillText: string;
   let skillTitle: string;
+  let category: string;
 
   if (builtIn) {
     skillText = loadSkill(builtIn.name);
     skillTitle = builtIn.title;
+    category = builtIn.category;
   } else {
     // Not a built-in — check org-authored skills (lib/skillAuthoring.ts).
     const custom = await prisma.customSkill.findFirst({ where: { orgId: ctx.orgId, name: args.skillName } });
     if (!custom) return { error: `Unknown skill "${args.skillName}".` };
     skillText = custom.content;
     skillTitle = custom.title;
+    category = custom.category;
   }
 
   const details = await getTrackerDetails(ctx, { trackerId: args.trackerId });
   if ("error" in details) return details;
+
+  // Framework-category skills (7S, SWOT, Alliance Health, JV Marketing
+  // Lifecycle, OKR alignment, RAG rubric, and any org-authored framework
+  // skill) are forced through a structured JSON contract instead of trusted
+  // free-text prose. Plain prose can *sound* like it applied a framework
+  // without actually walking every element the framework defines — the
+  // zod-validated per-element array is the real, human-visible proof it did.
+  if (category === "framework") {
+    const jsonPrompt = `You are applying exactly one named business framework to answer a focused question about one tracker. Use ONLY the supplied data — never invent facts.
+
+${skillText}
+
+## Tracker data
+${JSON.stringify(details, null, 2)}
+
+## Focus question
+${args.focus}
+
+## Output format
+Respond with ONLY a JSON object (no markdown fences, no commentary), matching exactly:
+{
+  "frameworkName": string — this framework's name, e.g. "McKinsey 7S (BioPharm Integration)",
+  "elements": [
+    {
+      "name": string — one element/dimension this framework defines (e.g. "Strategy", "Weaknesses", "Governance Cadence") — include EVERY element the framework defines, never skip or merge one,
+      "statusLabel": string — the framework's own short verdict for this element, in ITS OWN vocabulary (e.g. "ALIGNED", "AT RISK", "Red", "Strength"),
+      "statusTone": "positive" | "risk" | "negative" | "neutral" — normalize statusLabel into this bucket (no real signal yet = "neutral"),
+      "evidence": string — the specific fact or gap from the tracker data behind this call, or "no signal yet on <element>" if genuinely absent
+    }
+  ],
+  "soWhat": string — one sentence: the single highest-leverage takeaway across all elements
+}`;
+
+    try {
+      const raw = await generateJson(jsonPrompt);
+      const parsed = frameworkOutputSchema.parse(JSON.parse(raw));
+      return { framework: parsed, skillApplied: skillTitle };
+    } catch {
+      // Structured output failed validation — degrade to plain text rather
+      // than losing the analysis, but flag it so the UI can mark this run as
+      // NOT the verified per-element breakdown.
+      try {
+        const text = await generateText(
+          `${jsonPrompt}\n\n(Your previous structured JSON response failed validation. Respond instead as a plain-text analysis that still explicitly lists every framework element and its status.)`,
+        );
+        return { analysis: text, skillApplied: skillTitle, structuredOutputFailed: true };
+      } catch (err2) {
+        return { error: err2 instanceof Error ? err2.message : "Skill application failed." };
+      }
+    }
+  }
 
   const prompt = `You are applying exactly one analytical skill to answer a focused question about one tracker. Use ONLY the supplied data — never invent facts. Return a concise, well-grounded plain-text analysis (not JSON), citing specific figures/names from the data.
 
@@ -314,6 +392,45 @@ async function proposeDraftQuestion(ctx: ToolContext, args: { trackerId: string;
   return { proposalId: message.id, status: "pending_confirmation", note: "Staged, not sent yet. Tell the user to confirm or reject it in the chat." };
 }
 
+async function listUnresolvedEntities(ctx: ToolContext, args: { trackerId: string }) {
+  const tracker = await prisma.tracker.findFirst({ where: { id: args.trackerId, orgId: ctx.orgId }, select: { id: true } });
+  if (!tracker) return { error: "Tracker not found in this organization." };
+
+  const { findPromotableEntityCandidates } = await import("@/lib/entityExtraction");
+  const candidates = await findPromotableEntityCandidates(ctx.orgId, tracker.id);
+
+  return {
+    note: "These are names/projects mentioned repeatedly in ingested text that aren't yet a tracked stakeholder — already filtered for likely real entities, not generic nouns. Only propose_create_stakeholder for ones that genuinely make sense given the focus of the conversation; don't propose all of them reflexively.",
+    candidates,
+  };
+}
+
+async function proposeCreateStakeholder(
+  ctx: ToolContext,
+  args: { trackerId: string; name: string; roleOnTracker?: string; ownsWhat?: string },
+) {
+  const tracker = await prisma.tracker.findFirst({ where: { id: args.trackerId, orgId: ctx.orgId }, select: { id: true, name: true } });
+  if (!tracker) return { error: "Tracker not found in this organization." };
+
+  const message = await prisma.chatMessage.create({
+    data: {
+      sessionId: ctx.sessionId,
+      role: "assistant",
+      content: `Proposed stakeholder for **${tracker.name}**: "${args.name}"`,
+      proposalKind: "CREATE_STAKEHOLDER",
+      proposalStatus: "PENDING",
+      proposalTrackerId: tracker.id,
+      proposalPayload: JSON.stringify({
+        name: args.name,
+        roleOnTracker: args.roleOnTracker ?? "",
+        ownsWhat: args.ownsWhat ?? "",
+      }),
+    },
+  });
+
+  return { proposalId: message.id, status: "pending_confirmation", note: "Staged, not created yet. Tell the user to confirm or reject it in the chat." };
+}
+
 export async function executeAgentTool(name: string, args: Record<string, unknown>, ctx: ToolContext): Promise<unknown> {
   switch (name) {
     case "search_trackers":
@@ -330,6 +447,10 @@ export async function executeAgentTool(name: string, args: Record<string, unknow
       return proposeCreateAction(ctx, args as { trackerId: string; title: string; owner?: string; priority?: string; dueDate?: string });
     case "propose_draft_question":
       return proposeDraftQuestion(ctx, args as { trackerId: string; questionText: string; stakeholderId?: string });
+    case "list_unresolved_entities":
+      return listUnresolvedEntities(ctx, args as { trackerId: string });
+    case "propose_create_stakeholder":
+      return proposeCreateStakeholder(ctx, args as { trackerId: string; name: string; roleOnTracker?: string; ownsWhat?: string });
     default:
       return { error: `Unknown tool "${name}".` };
   }

@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { after } from "next/server";
 import { prisma } from "@/lib/db";
 import { ingestionPayloadSchema, type IngestionPayload } from "@/lib/validation/ingestion";
 
@@ -53,6 +54,23 @@ export async function ingestEvent(
   }
   const input: IngestionPayload = parsed.data;
 
+  // File path (Power Automate OneDrive/SharePoint flow) — extract text now,
+  // before storing anything, so a bad/unsupported file fails the request
+  // instead of silently creating an event with no usable content.
+  let rawText = input.rawText ?? "";
+  if (!input.rawText && input.fileName && input.fileBase64) {
+    try {
+      const buffer = Buffer.from(input.fileBase64, "base64");
+      const { extractText } = await import("@/lib/fileExtraction");
+      rawText = (await extractText(input.fileName, buffer)).trim();
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : "File extraction failed." };
+    }
+    if (!rawText) {
+      return { ok: false, error: `No extractable text found in "${input.fileName}" (e.g. a scanned/image-only file).` };
+    }
+  }
+
   let trackerId: string | null = null;
   let domainId: string | null = null;
   if (input.trackerId) {
@@ -76,7 +94,8 @@ export async function ingestEvent(
       fromAddress: input.fromAddress || null,
       participants: input.participants || null,
       occurredAt: input.occurredAt ? new Date(input.occurredAt) : new Date(),
-      rawText: input.rawText,
+      rawText,
+      fileName: input.fileName ?? null,
       rawPayload: input.rawPayload !== undefined ? JSON.stringify(input.rawPayload) : null,
       ingestedVia,
     },
@@ -87,19 +106,38 @@ export async function ingestEvent(
   // instead of either the full text or a meaningless fixed truncation.
   // Fire-and-forget for the same reason as the Stage 4 evaluation below:
   // this may be a webhook response path, and summarization is a Gemini call
-  // that shouldn't block it.
-  import("@/lib/ingestionSummary").then(({ summarizeIngestionEvent }) => summarizeIngestionEvent(event.id)).catch((err) => {
-    console.error("[ingestEvent] background summarization failed for", event.id, err);
-  });
+  // that shouldn't block it. Wrapped in after() (next/server) so it actually
+  // finishes on serverless (Vercel) instead of being killed the instant the
+  // response is sent — a plain un-awaited promise only reliably keeps
+  // running on a persistent Node server, not a serverless function.
+  after(() =>
+    import("@/lib/ingestionSummary").then(({ summarizeIngestionEvent }) => summarizeIngestionEvent(event.id)).catch((err) => {
+      console.error("[ingestEvent] background summarization failed for", event.id, err);
+    }),
+  );
 
   // Knowledge-graph dictionary-tier extraction (free, deterministic) — see
   // lib/entityExtraction.ts. Also fire-and-forget; a failure here never
   // affects ingestion itself.
-  import("@/lib/entityExtraction").then(({ extractDictionaryMentions }) =>
-    extractDictionaryMentions(orgId, "RAW_EVENT", event.id, input.rawText, trackerId),
-  ).catch((err) => {
-    console.error("[ingestEvent] background entity extraction failed for", event.id, err);
-  });
+  after(() =>
+    import("@/lib/entityExtraction").then(({ extractDictionaryMentions }) =>
+      extractDictionaryMentions(orgId, "RAW_EVENT", event.id, rawText, trackerId),
+    ).catch((err) => {
+      console.error("[ingestEvent] background entity extraction failed for", event.id, err);
+    }),
+  );
+
+  // Unresolved-mention tier — the "wiki-link to a page that doesn't exist
+  // yet" case (see lib/entityExtraction.ts). One extra Gemini call per event,
+  // only when it belongs to a tracker (nothing to promote a new stakeholder
+  // into otherwise). Also fire-and-forget, same reasoning as above.
+  after(() =>
+    import("@/lib/entityExtraction").then(({ extractUnresolvedMentions }) =>
+      extractUnresolvedMentions(orgId, "RAW_EVENT", event.id, rawText, trackerId),
+    ).catch((err) => {
+      console.error("[ingestEvent] background unresolved-entity extraction failed for", event.id, err);
+    }),
+  );
 
   // Stage 3 — if this event is tagged as answering an open question, close
   // the loop. Lenient on failure: an invalid/stale tag never fails ingestion,
@@ -116,10 +154,12 @@ export async function ingestEvent(
       // Stage 4 — score the answer in the background. Deliberately not
       // awaited: this is a webhook response path (Power Automate is
       // waiting), and evaluation is a Gemini call that shouldn't block it.
-      // Safe to fire-and-forget on our persistent Node server.
-      import("@/lib/evaluation").then(({ evaluateAnswer }) => evaluateAnswer(question.id)).catch((err) => {
-        console.error("[ingestEvent] background evaluation failed for", question.id, err);
-      });
+      // after() keeps it running past the response on serverless too.
+      after(() =>
+        import("@/lib/evaluation").then(({ evaluateAnswer }) => evaluateAnswer(question.id)).catch((err) => {
+          console.error("[ingestEvent] background evaluation failed for", question.id, err);
+        }),
+      );
     }
   }
 
