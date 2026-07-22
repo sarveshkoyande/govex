@@ -101,6 +101,18 @@ export async function ingestEvent(
     },
   });
 
+  // Drive-sync ledger — only when the caller sent both fields (the compare
+  // endpoint's contract) and this is a real tracker, not a domain-only
+  // context doc. Upsert, not create: a file can be re-ingested after a real
+  // edit, which should just advance the ledger row, not duplicate it.
+  if (input.driveFileId && input.driveModifiedAt && trackerId) {
+    await prisma.driveSyncedFile.upsert({
+      where: { trackerId_driveFileId: { trackerId, driveFileId: input.driveFileId } },
+      update: { driveModifiedAt: new Date(input.driveModifiedAt), eventId: event.id },
+      create: { orgId, trackerId, driveFileId: input.driveFileId, driveModifiedAt: new Date(input.driveModifiedAt), eventId: event.id },
+    });
+  }
+
   // Background summary for every event (not just answers) — this is what
   // search_raw_events shows the chat orchestrator as a manifest entry
   // instead of either the full text or a meaningless fixed truncation.

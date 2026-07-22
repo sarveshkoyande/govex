@@ -37,6 +37,7 @@ model Organization {
   ingestionApiKeys  IngestionApiKey[]
   outboundWebhook   OutboundWebhookConfig?
   driveSyncConfig   DriveSyncConfig?
+  driveSyncedFiles  DriveSyncedFile[]
   chatSessions      ChatSession[]
   insightFeedback   InsightFeedback[]
   skillPatchProposals SkillPatchProposal[]
@@ -424,6 +425,7 @@ model Tracker {
   fieldStates      FieldState[]
   fieldChanges     FieldChange[]
   rawIngestionEvents RawIngestionEvent[] // Stage 1 — raw email/meeting payloads, no synthesis
+  driveSyncedFiles   DriveSyncedFile[]   // per-file drive-sync ledger — see model comment
   synthesisRuns      SynthesisRun[]      // Stage 2 — Gemini synthesis runs
   aiSuggestions      AiSuggestion[]      // Stage 2 — draft suggestions pending review
   openQuestions      OpenQuestion[]      // Stage 3 — curiosity loop
@@ -756,6 +758,30 @@ model DriveSyncConfig {
   lastError  String?
 
   org Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+}
+
+// Per-file ledger for drive sync — lets /api/drive-sync/compare answer "have
+// we already ingested this exact version of this file" with a real lookup
+// instead of one blunt tracker-level "since" timestamp. driveFileId is the
+// SharePoint/OneDrive item id (the "{Identifier}" field); driveModifiedAt is
+// that file's own last-modified time, not when we happened to sync it —
+// re-saving the file advances this, which is exactly the signal that means
+// "fetch it again."
+model DriveSyncedFile {
+  id              String   @id @default(cuid())
+  orgId           String
+  trackerId       String
+  driveFileId     String
+  driveModifiedAt DateTime
+  eventId         String? // the RawIngestionEvent this ingest produced, if any
+
+  updatedAt DateTime @updatedAt
+
+  org     Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  tracker Tracker      @relation(fields: [trackerId], references: [id], onDelete: Cascade)
+
+  @@unique([trackerId, driveFileId])
+  @@index([orgId])
 }
 
 model OpenQuestion {

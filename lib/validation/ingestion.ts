@@ -22,6 +22,13 @@ export const ingestionPayloadSchema = z
     rawText: z.string().min(1).optional(),
     fileName: z.string().min(1).optional(), // e.g. "Weekly Sync Notes.docx" — extension picks the extractor
     fileBase64: z.string().min(1).optional(), // raw file bytes, base64-encoded
+    // Drive-sync only (see app/api/drive-sync/compare/route.ts) — the
+    // SharePoint/OneDrive item id and that file's own last-modified time.
+    // When both are present, ingestEvent records a DriveSyncedFile ledger
+    // entry so the next /api/drive-sync/compare call knows this exact
+    // version was already ingested and skips it.
+    driveFileId: z.string().min(1).optional(),
+    driveModifiedAt: z.string().datetime().optional(),
     rawPayload: z.unknown().optional(), // arbitrary original payload, stored serialized
     // Stage 3 — optional. When set, this event is treated as a stakeholder's
     // reply to that OpenQuestion (must be ASKED and belong to the same tracker).

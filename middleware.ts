@@ -27,6 +27,10 @@ export default auth((req) => {
     // called by the "Post adaptive card and wait for a response" flow once
     // the stakeholder submits the card.
     pathname.startsWith("/api/questions/answer") ||
+    // Machine-to-machine drive-sync comparison endpoint — same Bearer-token
+    // auth, called by the Power Automate drive-sync flow before it fetches
+    // any file content. See app/api/drive-sync/compare/route.ts.
+    pathname.startsWith("/api/drive-sync") ||
     pathname.startsWith("/_next") ||
     pathname === "/favicon.ico" ||
     pathname === "/icon.svg";
