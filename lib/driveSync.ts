@@ -21,7 +21,7 @@ export async function triggerDriveSync(
     return { triggered: false, status: "NOT_CONFIGURED" };
   }
 
-  const tracker = await prisma.tracker.findFirst({ where: { id: trackerId, orgId }, select: { driveLastSyncedAt: true } });
+  const tracker = await prisma.tracker.findFirst({ where: { id: trackerId, orgId }, select: { name: true, driveLastSyncedAt: true } });
   if (!tracker) return { triggered: false, status: "FAILED", error: "Tracker not found in this organization." };
 
   const triggeredAt = new Date();
@@ -33,9 +33,11 @@ export async function triggerDriveSync(
         "Content-Type": "application/json",
         ...(config.secret ? { Authorization: `Bearer ${config.secret}` } : {}),
       },
-      // `since` is null on a tracker's very first sync — the flow should
-      // treat that as "list everything in the folder."
-      body: JSON.stringify({ trackerId, since: tracker.driveLastSyncedAt?.toISOString() ?? null }),
+      // trackerName lets the flow build a per-tracker folder path (e.g.
+      // "GovEx/<trackerName>") without needing its own copy of every
+      // trackerId -> folder mapping. `since` is null on a tracker's very
+      // first sync — the flow should treat that as "list everything."
+      body: JSON.stringify({ trackerId, trackerName: tracker.name, since: tracker.driveLastSyncedAt?.toISOString() ?? null }),
       signal: AbortSignal.timeout(10_000),
     });
 
