@@ -15,6 +15,11 @@ const NODE_COLOR: Record<GraphNode["type"], string> = {
   STRATEGY_INSIGHT: "#d946ef", // bright magenta
   TACTIC_INSIGHT: "#facc15", // bright yellow
   RAW_EVENT: "#22d3ee", // bright cyan
+  // Deliberately muted/grey, unlike every other (bright, confirmed) node
+  // type — this is a candidate with no DB row yet, not a confirmed entity,
+  // and should read as visually "unresolved" at a glance, the same way
+  // Obsidian renders a link to a page that doesn't exist.
+  UNRESOLVED_ENTITY: "#94a3b8",
 };
 const NODE_RADIUS: Record<GraphNode["type"], number> = {
   TRACKER: 9,
@@ -23,6 +28,7 @@ const NODE_RADIUS: Record<GraphNode["type"], number> = {
   STRATEGY_INSIGHT: 3.5,
   TACTIC_INSIGHT: 2.5,
   RAW_EVENT: 3,
+  UNRESOLVED_ENTITY: 4,
 };
 const NODE_TYPE_LABEL: Record<GraphNode["type"], string> = {
   TRACKER: "Tracker",
@@ -31,23 +37,29 @@ const NODE_TYPE_LABEL: Record<GraphNode["type"], string> = {
   STRATEGY_INSIGHT: "Strategy insight",
   TACTIC_INSIGHT: "Tactic insight",
   RAW_EVENT: "Raw ingestion",
+  UNRESOLVED_ENTITY: "Unresolved entity",
 };
 // Content nodes (insights/tactics/raw events) can run into the hundreds —
 // always-on labels for those would bury the theme/domain/stakeholder labels
-// that matter most at a glance. Only these three types get a persistent
-// label; content-node labels only show in the click detail panel.
-const ALWAYS_LABELED = new Set<GraphNode["type"]>(["TRACKER", "DOMAIN", "STAKEHOLDER"]);
+// that matter most at a glance. Only these types get a persistent label;
+// everything else only shows its label in the click detail panel.
+// UNRESOLVED_ENTITY is included deliberately, unlike other content nodes —
+// the whole point is that it should be visible without clicking, the same
+// way Obsidian always labels an unresolved link.
+const ALWAYS_LABELED = new Set<GraphNode["type"]>(["TRACKER", "DOMAIN", "STAKEHOLDER", "UNRESOLVED_ENTITY"]);
 const EDGE_STYLE: Record<GraphEdge["kind"], { color: string; width: number; dash?: number[] }> = {
   STRUCTURAL: { color: "rgba(59, 130, 246, 0.5)", width: 1.4 },
   DICTIONARY: { color: "rgba(45, 212, 191, 0.65)", width: 1.2, dash: [3, 3] },
   CONCEPTUAL: { color: "rgba(251, 146, 60, 0.65)", width: 1.2, dash: [1, 3] },
   DERIVED: { color: "rgba(217, 70, 239, 0.65)", width: 1.2, dash: [6, 2] },
+  UNRESOLVED: { color: "rgba(148, 163, 184, 0.55)", width: 1, dash: [1, 2] },
 };
 const EDGE_KIND_LABEL: Record<GraphEdge["kind"], string> = {
   STRUCTURAL: "Structural relationship",
   DICTIONARY: "Named mention",
   DERIVED: "Derived from raw ingestion",
   CONCEPTUAL: "Conceptual link",
+  UNRESOLVED: "Unresolved mention",
 };
 
 interface FGNode extends GraphNode {
@@ -76,7 +88,7 @@ export default function KnowledgeGraph({ nodes, edges }: { nodes: GraphNode[]; e
   const canvasHostRef = useRef<HTMLDivElement>(null);
   const graphRef = useRef<any>(null);
   const [size, setSize] = useState({ width: 900, height: 520 });
-  const [visibleKinds, setVisibleKinds] = useState<Set<GraphEdge["kind"]>>(new Set(["STRUCTURAL", "DICTIONARY", "CONCEPTUAL", "DERIVED"]));
+  const [visibleKinds, setVisibleKinds] = useState<Set<GraphEdge["kind"]>>(new Set(["STRUCTURAL", "DICTIONARY", "CONCEPTUAL", "DERIVED", "UNRESOLVED"]));
   const [showContent, setShowContent] = useState(true);
   const [selection, setSelection] = useState<Selection>(null);
 
@@ -192,7 +204,7 @@ export default function KnowledgeGraph({ nodes, edges }: { nodes: GraphNode[]; e
   return (
     <div className="flex flex-col gap-3">
       <div className="flex flex-wrap items-center gap-3 rounded-xl border border-border bg-card px-4 py-2.5">
-        {(["STRUCTURAL", "DICTIONARY", "CONCEPTUAL", "DERIVED"] as const).map((kind) => (
+        {(["STRUCTURAL", "DICTIONARY", "CONCEPTUAL", "DERIVED", "UNRESOLVED"] as const).map((kind) => (
           <button
             key={kind}
             type="button"

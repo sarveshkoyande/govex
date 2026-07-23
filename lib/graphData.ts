@@ -5,7 +5,7 @@ export type ContentNodeType = "STRATEGY_INSIGHT" | "TACTIC_INSIGHT" | "RAW_EVENT
 
 export interface GraphNode {
   id: string; // prefixed, e.g. "TRACKER:xxx", "DOMAIN:xxx", "STAKEHOLDER:xxx"
-  type: "TRACKER" | "DOMAIN" | "STAKEHOLDER" | ContentNodeType;
+  type: "TRACKER" | "DOMAIN" | "STAKEHOLDER" | "UNRESOLVED_ENTITY" | ContentNodeType;
   label: string; // truncated, for on-canvas display
   detail?: string; // full untruncated text, for the click detail panel
 }
@@ -13,7 +13,7 @@ export interface GraphNode {
 export interface GraphEdge {
   source: string; // node id
   target: string; // node id
-  kind: "STRUCTURAL" | "DICTIONARY" | "CONCEPTUAL" | "DERIVED";
+  kind: "STRUCTURAL" | "DICTIONARY" | "CONCEPTUAL" | "DERIVED" | "UNRESOLVED";
   detail?: string; // snippet, shared-term list, or reasoning — shown on click
   confidence?: number;
 }
@@ -246,6 +246,22 @@ export async function buildGraph(orgId: string): Promise<{ nodes: GraphNode[]; e
     // actually reference.
     const contentNodeId = nodeId(m.sourceType as GraphNode["type"], m.sourceId);
     const sourceNodeId = nodes.has(contentNodeId) ? contentNodeId : ownerNodeId;
+
+    // UNRESOLVED — the actual "wiki-link to a page that doesn't exist yet"
+    // case (see lib/entityExtraction.ts). Unlike TERM mentions (collapsed
+    // into shared-vocabulary edges only), each unresolved candidate gets its
+    // own ghost node — ghost because it has no DB row of its own yet, just
+    // like an Obsidian unresolved link renders as a distinct, visually
+    // unresolved node rather than being invisible. Keyed per tracker+term
+    // (not globally) since a candidate's promotability is itself tracker-scoped.
+    if (m.targetType === "UNRESOLVED" && m.targetTerm && m.trackerId) {
+      const ghostNodeId = nodeId("UNRESOLVED_ENTITY", `${m.trackerId}:${m.targetTerm.toLowerCase()}`);
+      if (!nodes.has(ghostNodeId)) {
+        nodes.set(ghostNodeId, { id: ghostNodeId, type: "UNRESOLVED_ENTITY", label: m.targetTerm, detail: `Unresolved — ${m.reasoning ?? "candidate"}: "${m.targetTerm}"` });
+      }
+      edges.push({ source: sourceNodeId, target: ghostNodeId, kind: "UNRESOLVED", detail: m.contextSnippet, confidence: m.confidence });
+      continue;
+    }
 
     if (m.targetType === "TERM" && m.targetTerm) {
       if (!termOwners.has(m.targetTerm)) termOwners.set(m.targetTerm, new Set());

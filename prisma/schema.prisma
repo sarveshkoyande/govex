@@ -30,6 +30,15 @@ model Organization {
   // instead of waiting for SYSTEM_ADMIN approval in the Skills Library.
   autoApproveSkillPatches Boolean @default(false)
 
+  // When true (the default — matches OpenKB's auto-compiling-wiki behavior),
+  // a promotable unresolved-entity candidate (lib/entityExtraction.ts) is
+  // auto-created the moment it crosses the occurrence threshold — no human
+  // click. When false, candidates only ever appear in the on-page review
+  // panel (UnresolvedEntitiesPanel) for a human to confirm/dismiss. This is
+  // the one deliberate policy toggle between "wiki builds itself" and "human
+  // confirms every write" — see lib/entityExtraction.ts autoPromoteEntities.
+  autoPromoteEntities Boolean @default(true)
+
   users             User[]
   memberships       Membership[]
   domains           Domain[]
@@ -38,6 +47,7 @@ model Organization {
   outboundWebhook   OutboundWebhookConfig?
   driveSyncConfig   DriveSyncConfig?
   driveSyncedFiles  DriveSyncedFile[]
+  orgTerms          OrgTerm[]
   chatSessions      ChatSession[]
   insightFeedback   InsightFeedback[]
   skillPatchProposals SkillPatchProposal[]
@@ -301,6 +311,26 @@ model DismissedEntityCandidate {
   org Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
 
   @@unique([trackerId, term])
+  @@index([orgId])
+}
+
+// Org-authored counterpart to the hand-curated GLOSSARY_TERMS list in
+// lib/entityRegistry.ts — that list ships with the app and can't grow at
+// runtime; this table is where an OTHER-type unresolved-entity candidate
+// (a recurring acronym/system name, not a person or project) actually lands
+// when promoted, either by auto-promotion or a human confirming it in the
+// review panel. buildRegistry() reads both sources together.
+model OrgTerm {
+  id        String   @id @default(cuid())
+  orgId     String
+  term      String
+  scope     String   @default("specific") // universal | specific — same meaning as GLOSSARY_TERMS' scope
+
+  createdAt DateTime @default(now())
+
+  org Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@unique([orgId, term])
   @@index([orgId])
 }
 

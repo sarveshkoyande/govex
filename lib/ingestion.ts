@@ -145,14 +145,19 @@ export async function ingestEvent(
   // Unresolved-mention tier — the "wiki-link to a page that doesn't exist
   // yet" case (see lib/entityExtraction.ts). One extra Gemini call per event,
   // only when it belongs to a tracker (nothing to promote a new stakeholder
-  // into otherwise). Also fire-and-forget, same reasoning as above.
-  after(() =>
-    import("@/lib/entityExtraction").then(({ extractUnresolvedMentions }) =>
-      extractUnresolvedMentions(orgId, "RAW_EVENT", event.id, rawText, trackerId),
-    ).catch((err) => {
-      console.error("[ingestEvent] background unresolved-entity extraction failed for", event.id, err);
-    }),
-  );
+  // into otherwise). Also fire-and-forget, same reasoning as above. Chained
+  // (not parallel) with auto-promotion — that step needs this one's mentions
+  // to already be recorded before it aggregates them.
+  if (trackerId) {
+    after(() =>
+      import("@/lib/entityExtraction").then(async ({ extractUnresolvedMentions, autoPromoteEntityCandidates }) => {
+        await extractUnresolvedMentions(orgId, "RAW_EVENT", event.id, rawText, trackerId);
+        await autoPromoteEntityCandidates(orgId, trackerId);
+      }).catch((err) => {
+        console.error("[ingestEvent] background unresolved-entity extraction/promotion failed for", event.id, err);
+      }),
+    );
+  }
 
   // Stage 3 — if this event is tagged as answering an open question, close
   // the loop. Lenient on failure: an invalid/stale tag never fails ingestion,

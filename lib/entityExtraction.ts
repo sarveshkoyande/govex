@@ -3,6 +3,7 @@ import { buildRegistry, type RegistryEntry } from "@/lib/entityRegistry";
 import { loadSkill } from "@/lib/skills";
 import { generateJson } from "@/lib/gemini";
 import { conceptualLinkResponseSchema, unresolvedEntityClassificationSchema } from "@/lib/validation/entityMention";
+import { selectRelevantChunks } from "@/lib/pageIndex";
 
 export type MentionSourceType = "RAW_EVENT" | "STRATEGY_INSIGHT" | "TACTIC_INSIGHT";
 
@@ -293,6 +294,79 @@ export async function findPromotableEntityCandidates(orgId: string, trackerId: s
     .sort((a, b) => b.occurrences - a.occurrences);
 }
 
+// The auto-compile side of the entity-promotion policy toggle
+// (Organization.autoPromoteEntities — default true, matching OpenKB's
+// build-the-wiki-automatically behavior). Called after every ingest; when
+// the org has this off, it's a no-op and candidates only ever surface via
+// the on-page review panel for a human to confirm. When on, a candidate
+// that's crossed the occurrence threshold gets created immediately:
+//   PERSON  -> Stakeholder on this tracker
+//   PROJECT -> MicroBattle on this tracker (a lightweight execution
+//              workstream — the closest thing to "a project" that doesn't
+//              require the heavier shape a whole new Tracker would need)
+//   OTHER   -> OrgTerm (the runtime-growable counterpart to the built-in
+//              GLOSSARY_TERMS list)
+// Each creation makes the registry recognize that term going forward
+// (lib/entityRegistry.ts), which is what naturally stops
+// findPromotableEntityCandidates from offering it again — no separate
+// "already auto-promoted" bookkeeping needed.
+// Shared by both the automatic path (autoPromoteEntityCandidates below,
+// fire-and-forget from ingestion) and the human-triggered path
+// (app/actions/unresolvedEntities.ts, one click in the review panel) — same
+// mapping either way, just a different trigger. Case-insensitive
+// existence-check-before-create on every branch: with several raw events
+// ingesting in parallel (e.g. a batch drive-sync), multiple background
+// promotion runs can legitimately see the same not-yet-created candidate at
+// once, so a plain create() would race and duplicate it. This doesn't fully
+// eliminate the race window (still two separate queries, not one atomic
+// operation) but the window is now microseconds instead of the entire
+// candidate-aggregation pass, which is enough in practice at this volume.
+export async function promoteCandidate(
+  orgId: string,
+  trackerId: string,
+  term: string,
+  entityType: "PERSON" | "PROJECT" | "OTHER",
+): Promise<{ id: string; created: boolean }> {
+  if (entityType === "PERSON") {
+    const existing = await prisma.stakeholder.findFirst({ where: { trackerId, name: { equals: term, mode: "insensitive" } } });
+    if (existing) return { id: existing.id, created: false };
+    const stakeholder = await prisma.stakeholder.create({ data: { trackerId, name: term } });
+    return { id: stakeholder.id, created: true };
+  }
+  if (entityType === "PROJECT") {
+    const existing = await prisma.microBattle.findFirst({ where: { trackerId, name: { equals: term, mode: "insensitive" } } });
+    if (existing) return { id: existing.id, created: false };
+    const count = await prisma.microBattle.count({ where: { trackerId } });
+    const microBattle = await prisma.microBattle.create({ data: { trackerId, name: term, order: count } });
+    return { id: microBattle.id, created: true };
+  }
+  const orgTerm = await prisma.orgTerm.upsert({
+    where: { orgId_term: { orgId, term } },
+    update: {},
+    create: { orgId, term, scope: "specific" },
+  });
+  return { id: orgTerm.id, created: true };
+}
+
+export async function autoPromoteEntityCandidates(orgId: string, trackerId: string): Promise<void> {
+  const org = await prisma.organization.findUnique({ where: { id: orgId }, select: { autoPromoteEntities: true } });
+  if (!org?.autoPromoteEntities) return;
+
+  const candidates = await findPromotableEntityCandidates(orgId, trackerId);
+  if (candidates.length === 0) return;
+
+  for (const c of candidates) {
+    try {
+      await promoteCandidate(orgId, trackerId, c.term, c.entityType);
+    } catch (err) {
+      // Never let one candidate's auto-promotion failure block the rest —
+      // this runs fire-and-forget from ingestion (see lib/ingestion.ts) and
+      // a partial success is strictly better than none.
+      console.error("[autoPromoteEntityCandidates] failed to promote", c.term, err instanceof Error ? err.message : err);
+    }
+  }
+}
+
 interface Profile {
   eventId: string; // the CONTEXT_DOC RawIngestionEvent this profile's summary came from — mentions are recorded against it
   targetType: "TRACKER" | "DOMAIN";
@@ -359,8 +433,16 @@ async function buildProfiles(orgId: string): Promise<Profile[]> {
     .filter((p): p is Profile => p !== null);
 }
 
+// PageIndex-style retrieval (lib/pageIndex.ts) for the "others" side only —
+// the source profile keeps its full text (it's the one being described,
+// needs complete context), but each OTHER profile's summary is trimmed to
+// just the chunks most relevant to THIS source's content, using the
+// source's own summary as the query. A no-op for any profile short enough
+// to not need chunking in the first place; only matters once an org has
+// several long (13-20k char) context docs being compared against each other.
 function buildConceptualPrompt(source: Profile, others: Profile[]): string {
   const skill = loadSkill("entity-conceptual-linking");
+  const trimmedOthers = others.map((o) => ({ ...o, summary: selectRelevantChunks(o.summary, source.summary) }));
   return `${skill}
 
 ## This theme's profile
@@ -370,7 +452,7 @@ ${source.summary}
 
 ## Every other theme in the org (potential connection targets)
 
-${others.map((o) => `- id="${o.targetId}" name="${o.name}"\n  ${o.summary}`).join("\n\n")}
+${trimmedOthers.map((o) => `- id="${o.targetId}" name="${o.name}"\n  ${o.summary}`).join("\n\n")}
 
 ## Required JSON output schema
 

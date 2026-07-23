@@ -6,7 +6,7 @@ import { prisma } from "@/lib/db";
 // This keeps extraction free of the fabrication risk open-ended NER would
 // carry, per the project's grounding discipline.
 export interface RegistryEntry {
-  targetType: "TRACKER" | "STAKEHOLDER" | "TERM";
+  targetType: "TRACKER" | "STAKEHOLDER" | "TERM" | "MICROBATTLE";
   targetId: string | null; // set for TRACKER/STAKEHOLDER, null for TERM
   targetTerm: string | null; // set for TERM, null otherwise
   aliases: string[]; // lowercased, longest-first is not required — caller sorts
@@ -80,9 +80,19 @@ export function isSpecificTerm(term: string): boolean {
 }
 
 export async function buildRegistry(orgId: string): Promise<RegistryEntry[]> {
-  const [trackers, stakeholders] = await Promise.all([
+  const [trackers, stakeholders, microBattles, orgTerms] = await Promise.all([
     prisma.tracker.findMany({ where: { orgId }, select: { id: true, name: true } }),
     prisma.stakeholder.findMany({ where: { tracker: { orgId } }, select: { id: true, name: true, email: true } }),
+    // PROJECT-type unresolved-entity candidates promote into a MicroBattle
+    // (see lib/entityExtraction.ts) — registered here so a promoted project
+    // (a) stops being offered again as an unresolved candidate, and (b) gets
+    // recognized by future dictionary-tier extraction the same as any other
+    // named entity.
+    prisma.microBattle.findMany({ where: { tracker: { orgId } }, select: { id: true, name: true, trackerId: true } }),
+    // OTHER-type candidates promote into an org-authored term instead —
+    // the runtime-growable counterpart to the hand-curated GLOSSARY_TERMS
+    // list below, which ships with the app and can't grow at runtime.
+    prisma.orgTerm.findMany({ where: { orgId }, select: { term: true, scope: true } }),
   ]);
 
   const entries: RegistryEntry[] = [];
@@ -109,6 +119,14 @@ export async function buildRegistry(orgId: string): Promise<RegistryEntry[]> {
 
   for (const { term, scope } of GLOSSARY_TERMS) {
     entries.push({ targetType: "TERM", targetId: null, targetTerm: term, aliases: [term.toLowerCase()], orgId, scope });
+  }
+
+  for (const t of orgTerms) {
+    entries.push({ targetType: "TERM", targetId: null, targetTerm: t.term, aliases: [t.term.toLowerCase()], orgId, scope: t.scope === "specific" ? "specific" : "universal" });
+  }
+
+  for (const mb of microBattles) {
+    entries.push({ targetType: "MICROBATTLE", targetId: mb.id, targetTerm: null, aliases: [mb.name.toLowerCase()], orgId });
   }
 
   return entries;

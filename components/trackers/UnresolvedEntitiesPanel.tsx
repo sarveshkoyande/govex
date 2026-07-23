@@ -2,7 +2,7 @@
 
 import { useState, useTransition } from "react";
 import { toast } from "sonner";
-import { UserPlus, Ban, ChevronDown, ChevronUp } from "lucide-react";
+import { UserPlus, FolderPlus, Tag, Ban, ChevronDown, ChevronUp } from "lucide-react";
 import { promoteEntityCandidate, dismissEntityCandidate } from "@/app/actions/unresolvedEntities";
 import { cn } from "@/lib/utils";
 import type { PromotableEntityCandidate } from "@/lib/entityExtraction";
@@ -13,14 +13,27 @@ const TYPE_LABEL: Record<PromotableEntityCandidate["entityType"], string> = {
   OTHER: "Other",
 };
 
+const PROMOTE_LABEL: Record<PromotableEntityCandidate["entityType"], string> = {
+  PERSON: "Add as Stakeholder",
+  PROJECT: "Add as Workstream",
+  OTHER: "Add to Glossary",
+};
+
+const PROMOTE_ICON: Record<PromotableEntityCandidate["entityType"], typeof UserPlus> = {
+  PERSON: UserPlus,
+  PROJECT: FolderPlus,
+  OTHER: Tag,
+};
+
 function CandidateRow({ trackerId, candidate, onResolved }: { trackerId: string; candidate: PromotableEntityCandidate; onResolved: (term: string) => void }) {
   const [pending, startTransition] = useTransition();
+  const PromoteIcon = PROMOTE_ICON[candidate.entityType];
 
   function promote() {
     startTransition(async () => {
-      const res = await promoteEntityCandidate(trackerId, candidate.term);
+      const res = await promoteEntityCandidate(trackerId, candidate.term, candidate.entityType);
       if (!res.ok) { toast.error(res.error); return; }
-      toast.success(`Added "${candidate.term}" as a stakeholder.`);
+      toast.success(`${PROMOTE_LABEL[candidate.entityType]}: "${candidate.term}".`);
       onResolved(candidate.term);
     });
   }
@@ -43,16 +56,14 @@ function CandidateRow({ trackerId, candidate, onResolved }: { trackerId: string;
           <span className="text-[10px] text-muted-foreground">{candidate.occurrences}× mentioned</span>
         </div>
         <div className="flex items-center gap-1.5">
-          {candidate.entityType === "PERSON" && (
-            <button
-              type="button"
-              onClick={promote}
-              disabled={pending}
-              className="inline-flex items-center gap-1 rounded-md bg-primary/10 px-2 py-1 text-[10px] font-semibold text-primary hover:bg-primary/15 disabled:opacity-60"
-            >
-              <UserPlus size={11} /> Add as Stakeholder
-            </button>
-          )}
+          <button
+            type="button"
+            onClick={promote}
+            disabled={pending}
+            className="inline-flex items-center gap-1 rounded-md bg-primary/10 px-2 py-1 text-[10px] font-semibold text-primary hover:bg-primary/15 disabled:opacity-60"
+          >
+            <PromoteIcon size={11} /> {PROMOTE_LABEL[candidate.entityType]}
+          </button>
           <button
             type="button"
             onClick={dismiss}
