@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useTransition } from "react";
+import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { UserPlus, FolderPlus, Tag, Ban, ChevronDown, ChevronUp } from "lucide-react";
 import { promoteEntityCandidate, dismissEntityCandidate } from "@/app/actions/unresolvedEntities";
@@ -26,6 +27,7 @@ const PROMOTE_ICON: Record<PromotableEntityCandidate["entityType"], typeof UserP
 };
 
 function CandidateRow({ trackerId, candidate, onResolved }: { trackerId: string; candidate: PromotableEntityCandidate; onResolved: (term: string) => void }) {
+  const router = useRouter();
   const [pending, startTransition] = useTransition();
   const PromoteIcon = PROMOTE_ICON[candidate.entityType];
 
@@ -35,6 +37,10 @@ function CandidateRow({ trackerId, candidate, onResolved }: { trackerId: string;
       if (!res.ok) { toast.error(res.error); return; }
       toast.success(`${PROMOTE_LABEL[candidate.entityType]}: "${candidate.term}".`);
       onResolved(candidate.term);
+      // The promotion is a real new Stakeholder/MicroBattle/OrgTerm row —
+      // other parts of this page (the graph, stakeholder list, workstream
+      // list) are server-rendered and won't pick it up without this.
+      router.refresh();
     });
   }
   function dismiss() {
@@ -42,6 +48,7 @@ function CandidateRow({ trackerId, candidate, onResolved }: { trackerId: string;
       const res = await dismissEntityCandidate(trackerId, candidate.term);
       if (!res.ok) { toast.error(res.error); return; }
       onResolved(candidate.term);
+      router.refresh();
     });
   }
 

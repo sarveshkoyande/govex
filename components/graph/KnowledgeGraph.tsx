@@ -22,13 +22,13 @@ const NODE_COLOR: Record<GraphNode["type"], string> = {
   UNRESOLVED_ENTITY: "#94a3b8",
 };
 const NODE_RADIUS: Record<GraphNode["type"], number> = {
-  TRACKER: 9,
-  DOMAIN: 6.5,
-  STAKEHOLDER: 5,
-  STRATEGY_INSIGHT: 3.5,
-  TACTIC_INSIGHT: 2.5,
-  RAW_EVENT: 3,
-  UNRESOLVED_ENTITY: 4,
+  TRACKER: 15,
+  DOMAIN: 11,
+  STAKEHOLDER: 8.5,
+  STRATEGY_INSIGHT: 6,
+  TACTIC_INSIGHT: 4.5,
+  RAW_EVENT: 5,
+  UNRESOLVED_ENTITY: 7,
 };
 const NODE_TYPE_LABEL: Record<GraphNode["type"], string> = {
   TRACKER: "Tracker",
@@ -39,12 +39,6 @@ const NODE_TYPE_LABEL: Record<GraphNode["type"], string> = {
   RAW_EVENT: "Raw ingestion",
   UNRESOLVED_ENTITY: "Unresolved entity",
 };
-// Content nodes (insights/tactics/raw events) can run into the hundreds —
-// always-on labels for those would bury the theme/domain/stakeholder labels
-// that matter most at a glance. Only these types get a persistent label
-// (Sigma's per-node `forceLabel` attribute, set below); everything else
-// only shows its label on hover or in the click detail panel.
-const ALWAYS_LABELED = new Set<GraphNode["type"]>(["TRACKER", "DOMAIN", "STAKEHOLDER", "UNRESOLVED_ENTITY"]);
 // Sigma's default edge renderer draws plain lines — no native dash-pattern
 // support without a custom edge program, so kind is differentiated by
 // color + width instead of the force-graph version's dash patterns.
@@ -126,13 +120,17 @@ export default function KnowledgeGraph({ nodes, edges }: { nodes: GraphNode[]; e
       const graph = new Graph({ multi: true, type: "mixed" });
 
       for (const n of filteredNodes) {
+        // Spread initial positions out (not all clustered at origin) — FA2
+        // converges much faster, and looks less like a starburst exploding
+        // outward, from a wider random start.
+        const angle = Math.random() * 2 * Math.PI;
+        const radius = Math.random() * 400;
         graph.addNode(n.id, {
-          x: Math.random(),
-          y: Math.random(),
+          x: Math.cos(angle) * radius,
+          y: Math.sin(angle) * radius,
           size: NODE_RADIUS[n.type],
           color: NODE_COLOR[n.type],
           label: n.label,
-          forceLabel: ALWAYS_LABELED.has(n.type),
         });
       }
       for (const e of filteredEdges) {
@@ -146,20 +144,16 @@ export default function KnowledgeGraph({ nodes, edges }: { nodes: GraphNode[]; e
         });
       }
 
-      // One-shot layout (not a continuously-running simulation) — settles
-      // into natural clustering, then Sigma just renders + handles
-      // pan/zoom/drag from there. Cheaper and steadier than re-running
-      // physics on every interaction.
-      if (graph.order > 0) {
-        forceAtlas2.assign(graph, {
-          iterations: 150,
-          settings: { gravity: 1, scalingRatio: 10, strongGravityMode: true, slowDown: 2, barnesHutOptimize: graph.order > 200 },
-        });
-      }
-
+      // Hover-only labels — nothing is drawn on top of a node until you
+      // mouse over it (or select it), keeping the canvas clean instead of
+      // cluttered with always-on text. Read via closure over a mutable ref
+      // updated by the enterNode/leaveNode handlers below, since a Sigma
+      // reducer needs to stay in sync with hover state without re-creating
+      // the whole renderer on every hover (a React state dependency here
+      // would do exactly that).
+      const hoveredRef = { current: null as string | null };
       renderer = new Sigma(graph, canvasHostRef.current, {
         renderLabels: true,
-        labelRenderedSizeThreshold: 0,
         labelColor: { color: "#e2e8f0" },
         labelFont: "Inter, system-ui, sans-serif",
         labelWeight: "600",
@@ -167,8 +161,17 @@ export default function KnowledgeGraph({ nodes, edges }: { nodes: GraphNode[]; e
         defaultEdgeColor: "rgba(148, 163, 184, 0.4)",
         minCameraRatio: 0.03,
         maxCameraRatio: 12,
+        nodeReducer: (node: string, data: Record<string, unknown>) => (node === hoveredRef.current ? data : { ...data, label: null }),
       });
 
+      renderer.on("enterNode", ({ node }: { node: string }) => {
+        hoveredRef.current = node;
+        renderer?.refresh();
+      });
+      renderer.on("leaveNode", () => {
+        hoveredRef.current = null;
+        renderer?.refresh();
+      });
       renderer.on("clickNode", ({ node }: { node: string }) => {
         const n = nodeById.get(node);
         if (n) setSelection({ type: "node", node: n });
@@ -184,6 +187,24 @@ export default function KnowledgeGraph({ nodes, edges }: { nodes: GraphNode[]; e
       renderer.on("clickStage", () => setSelection(null));
 
       rendererRef.current = renderer;
+
+      // Animated, non-blocking layout — small batches of FA2 iterations
+      // yielded to the browser via requestAnimationFrame between each, so
+      // (a) the tab never freezes waiting for physics to finish, and (b)
+      // nodes visibly settle into place instead of just popping into their
+      // final position, matching the "alive" feel a continuous force
+      // simulation gives.
+      if (graph.order > 0) {
+        const settings = { gravity: 1, scalingRatio: 10, strongGravityMode: true, slowDown: 2, barnesHutOptimize: graph.order > 200 };
+        const totalIterations = 100;
+        const batchSize = 3;
+        for (let done = 0; done < totalIterations; done += batchSize) {
+          if (cancelled) return;
+          forceAtlas2.assign(graph, { iterations: batchSize, settings });
+          renderer.refresh();
+          await new Promise((resolve) => requestAnimationFrame(resolve));
+        }
+      }
     })();
 
     return () => {
