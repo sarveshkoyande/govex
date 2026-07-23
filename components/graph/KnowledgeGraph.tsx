@@ -71,24 +71,36 @@ export default function KnowledgeGraph({ nodes, edges }: { nodes: GraphNode[]; e
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const rendererRef = useRef<any>(null);
   const [size, setSize] = useState({ width: 900, height: 520 });
-  const [visibleKinds, setVisibleKinds] = useState<Set<GraphEdge["kind"]>>(new Set(["STRUCTURAL", "DICTIONARY", "CONCEPTUAL", "DERIVED", "UNRESOLVED"]));
+  // STRUCTURAL (tracker -> every insight/tactic/raw event) starts OFF, not
+  // on — this view is already ego-network-filtered to one tracker
+  // (egoNetwork()), so every node here is implicitly "connected to the
+  // center" already; drawing that as ~90 spokes to a hub adds no
+  // information and buries the actually-interesting DICTIONARY/CONCEPTUAL/
+  // UNRESOLVED cross-links in visual noise. Still toggleable if wanted.
+  const [visibleKinds, setVisibleKinds] = useState<Set<GraphEdge["kind"]>>(new Set(["DICTIONARY", "CONCEPTUAL", "DERIVED", "UNRESOLVED"]));
   const [showContent, setShowContent] = useState(true);
   const [selection, setSelection] = useState<Selection>(null);
 
   const contentTypes = useMemo(() => new Set<GraphNode["type"]>(["STRATEGY_INSIGHT", "TACTIC_INSIGHT", "RAW_EVENT"]), []);
-  const filteredEdges = useMemo(() => {
-    const byKind = edges.filter((e) => visibleKinds.has(e.kind));
-    if (showContent) return byKind;
-    const contentNodeIds = new Set(nodes.filter((n) => contentTypes.has(n.type)).map((n) => n.id));
-    return byKind.filter((e) => !contentNodeIds.has(e.source) && !contentNodeIds.has(e.target));
-  }, [edges, visibleKinds, showContent, nodes, contentTypes]);
+  // Node inclusion is decided from EVERY edge kind, always — including
+  // STRUCTURAL even when it's toggled off from being drawn. Otherwise
+  // hiding STRUCTURAL lines would make every insight/tactic/raw event whose
+  // only edge is the structural one (the vast majority) disappear
+  // entirely, not just lose its line to the center.
+  const contentNodeIds = useMemo(() => new Set(nodes.filter((n) => contentTypes.has(n.type)).map((n) => n.id)), [nodes, contentTypes]);
+  const allRelevantEdges = useMemo(() => {
+    if (showContent) return edges;
+    return edges.filter((e) => !contentNodeIds.has(e.source) && !contentNodeIds.has(e.target));
+  }, [edges, showContent, contentNodeIds]);
   const connectedIds = useMemo(() => {
     const ids = new Set<string>();
-    for (const e of filteredEdges) { ids.add(e.source); ids.add(e.target); }
+    for (const e of allRelevantEdges) { ids.add(e.source); ids.add(e.target); }
     return ids;
-  }, [filteredEdges]);
+  }, [allRelevantEdges]);
   const filteredNodes = useMemo(() => nodes.filter((n) => connectedIds.has(n.id)), [nodes, connectedIds]);
   const nodeById = useMemo(() => new Map(filteredNodes.map((n) => [n.id, n])), [filteredNodes]);
+  // What actually gets drawn as a line — kind-filtered, unlike node inclusion above.
+  const filteredEdges = useMemo(() => allRelevantEdges.filter((e) => visibleKinds.has(e.kind)), [allRelevantEdges, visibleKinds]);
 
   useEffect(() => {
     if (!containerRef.current) return;

@@ -120,6 +120,15 @@ export async function getAgentToolDeclarations(orgId: string): Promise<FunctionD
     },
   },
   {
+    name: "get_tracker_connections",
+    description: "Get this tracker's real connections from the knowledge graph — Gemini-judged thematic links to other trackers that share no literal vocabulary (conceptualConnections, with specific reasoning), plus literal named mentions of this tracker found elsewhere (namedMentions). Use this whenever asked how one tracker relates to another, or for cross-theme comparisons — never guess at a connection from your own reasoning alone when this tool can ground it in what was actually computed.",
+    parametersJsonSchema: {
+      type: "object",
+      properties: { trackerId: { type: "string" } },
+      required: ["trackerId"],
+    },
+  },
+  {
     name: "propose_create_stakeholder",
     description: "Propose adding a new stakeholder to a tracker — typically a name surfaced by list_unresolved_entities that keeps coming up. This does NOT create it yet — it stages a proposal the user must explicitly confirm in the chat UI.",
     parametersJsonSchema: {
@@ -405,6 +414,58 @@ async function listUnresolvedEntities(ctx: ToolContext, args: { trackerId: strin
   };
 }
 
+async function getTrackerConnections(ctx: ToolContext, args: { trackerId: string }) {
+  const tracker = await prisma.tracker.findFirst({ where: { id: args.trackerId, orgId: ctx.orgId }, select: { id: true, name: true } });
+  if (!tracker) return { error: "Tracker not found in this organization." };
+
+  // Everything the knowledge graph (Connections view) already computed —
+  // this tool is what lets the chat agent actually SEE that graph instead
+  // of only rendering it visually. CONCEPTUAL is the cross-theme "these two
+  // are thematically related despite no shared vocabulary" tier
+  // (rebuildConceptualMentions); DICTIONARY/TRACKER is a literal named
+  // mention of another tracker somewhere in this tracker's own content.
+  const [asSource, asTarget] = await Promise.all([
+    prisma.entityMention.findMany({
+      where: { orgId: ctx.orgId, method: "CONCEPTUAL", sourceType: "RAW_EVENT" },
+      select: { sourceId: true, targetType: true, targetId: true, confidence: true, reasoning: true },
+    }),
+    prisma.entityMention.findMany({
+      where: { orgId: ctx.orgId, targetType: "TRACKER", targetId: tracker.id, method: { in: ["DICTIONARY", "CONCEPTUAL"] } },
+      select: { sourceType: true, sourceId: true, method: true, confidence: true, reasoning: true, contextSnippet: true },
+    }),
+  ]);
+
+  // CONCEPTUAL mentions are recorded on the SOURCE tracker's context-doc
+  // event, pointing AT the other tracker — so "this tracker's own
+  // conceptual connections" means filtering asSource down to ones whose
+  // source event actually belongs to this tracker.
+  const ownContextDocIds = await prisma.rawIngestionEvent.findMany({
+    where: { trackerId: tracker.id, source: "CONTEXT_DOC" },
+    select: { id: true },
+  });
+  const ownEventIds = new Set(ownContextDocIds.map((e) => e.id));
+  const outgoingConceptual = asSource.filter((m) => ownEventIds.has(m.sourceId) && m.targetType === "TRACKER" && m.targetId !== tracker.id);
+
+  const trackerIds = new Set([...outgoingConceptual.map((m) => m.targetId!), ...asTarget.filter((m) => m.method === "CONCEPTUAL").map(() => tracker.id)]);
+  const relatedTrackers = trackerIds.size > 0 ? await prisma.tracker.findMany({ where: { id: { in: [...trackerIds] } }, select: { id: true, name: true } }) : [];
+  const nameById = new Map(relatedTrackers.map((t) => [t.id, t.name]));
+
+  const conceptualConnections = [
+    ...outgoingConceptual.map((m) => ({ relatedTracker: nameById.get(m.targetId!) ?? m.targetId, confidence: m.confidence, reasoning: m.reasoning })),
+    ...asTarget.filter((m) => m.method === "CONCEPTUAL").map((m) => ({ relatedTracker: tracker.name, confidence: m.confidence, reasoning: m.reasoning })),
+  ];
+
+  const namedMentions = asTarget
+    .filter((m) => m.method === "DICTIONARY")
+    .map((m) => ({ mentionedIn: m.sourceType, confidence: m.confidence, snippet: m.contextSnippet }));
+
+  return {
+    note: "conceptualConnections are Gemini-judged thematic links to OTHER trackers with no shared vocabulary (from the knowledge graph's CONCEPTUAL tier) — cite the reasoning verbatim, it's specific, not generic. namedMentions are literal name-drops of this tracker found in other content.",
+    conceptualConnections,
+    namedMentions,
+  };
+}
+
 async function proposeCreateStakeholder(
   ctx: ToolContext,
   args: { trackerId: string; name: string; roleOnTracker?: string; ownsWhat?: string },
@@ -449,6 +510,8 @@ export async function executeAgentTool(name: string, args: Record<string, unknow
       return proposeDraftQuestion(ctx, args as { trackerId: string; questionText: string; stakeholderId?: string });
     case "list_unresolved_entities":
       return listUnresolvedEntities(ctx, args as { trackerId: string });
+    case "get_tracker_connections":
+      return getTrackerConnections(ctx, args as { trackerId: string });
     case "propose_create_stakeholder":
       return proposeCreateStakeholder(ctx, args as { trackerId: string; name: string; roleOnTracker?: string; ownsWhat?: string });
     default:
