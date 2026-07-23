@@ -3,7 +3,7 @@ import { buildRegistry, type RegistryEntry } from "@/lib/entityRegistry";
 import { loadSkill } from "@/lib/skills";
 import { generateJson } from "@/lib/gemini";
 import { conceptualLinkResponseSchema, unresolvedEntityClassificationSchema } from "@/lib/validation/entityMention";
-import { selectRelevantChunks } from "@/lib/pageIndex";
+import { selectRelevantContent } from "@/lib/pageIndex";
 
 export type MentionSourceType = "RAW_EVENT" | "STRATEGY_INSIGHT" | "TACTIC_INSIGHT";
 
@@ -433,16 +433,17 @@ async function buildProfiles(orgId: string): Promise<Profile[]> {
     .filter((p): p is Profile => p !== null);
 }
 
-// PageIndex-style retrieval (lib/pageIndex.ts) for the "others" side only —
-// the source profile keeps its full text (it's the one being described,
-// needs complete context), but each OTHER profile's summary is trimmed to
-// just the chunks most relevant to THIS source's content, using the
-// source's own summary as the query. A no-op for any profile short enough
-// to not need chunking in the first place; only matters once an org has
-// several long (13-20k char) context docs being compared against each other.
+// PageIndex-style tree retrieval (lib/pageIndex.ts) for the "others" side
+// only — the source profile keeps its full text (it's the one being
+// described, needs complete context), but each OTHER profile's summary is
+// pruned down to just the sections whose own heading+text are relevant to
+// THIS source's content, using the source's own summary as the query. A
+// no-op for anything under 2000 chars (not worth building a tree for) or
+// with no detected section headings; only matters once an org has several
+// long (13-20k char) context docs being compared against each other.
 function buildConceptualPrompt(source: Profile, others: Profile[]): string {
   const skill = loadSkill("entity-conceptual-linking");
-  const trimmedOthers = others.map((o) => ({ ...o, summary: selectRelevantChunks(o.summary, source.summary) }));
+  const trimmedOthers = others.map((o) => ({ ...o, summary: selectRelevantContent(o.summary, source.summary) }));
   return `${skill}
 
 ## This theme's profile
