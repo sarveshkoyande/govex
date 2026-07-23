@@ -3,17 +3,17 @@ import { verifyIngestionToken } from "@/lib/ingestion";
 import { prisma } from "@/lib/db";
 
 // Step 1 of the two-call drive sync — the Power Automate flow lists every
-// file in a tracker's folder (metadata only, id/name/modified time, no
-// content) and POSTs that list here. GovEx does the actual "is this new or
-// changed" comparison against DriveSyncedFile (per-file ledger, not one
-// blunt tracker-level timestamp) and returns only the subset the flow
-// actually needs to fetch content for and POST to /api/ingest. Keeps the
-// comparison logic in code, testable, instead of Power Automate's Condition
-// UI trying to replicate it per file.
+// file in a tracker's folder (metadata only: id/name, no content) and POSTs
+// that list here. GovEx does the actual "have we already ingested this file"
+// check against DriveSyncedFile (a per-file ledger) and returns only the
+// ones it's never seen before. Existence-only — files in this folder are
+// static once placed, never edited in place, so there's no "changed since"
+// case to detect, just "new" vs. "already synced." Keeps the comparison in
+// testable code instead of Power Automate's Condition UI.
 //
 // POST /api/drive-sync/compare
 // Authorization: Bearer <ingestion API token>   (same keys as /api/ingest)
-// body: { trackerId: string, files: [{ id: string, name: string, modifiedAt: string }] }
+// body: { trackerId: string, files: [{ id: string, name: string }] }
 // response: { ok: true, needed: [{ id: string, name: string }] }
 export async function POST(req: Request) {
   const authHeader = req.headers.get("authorization") ?? "";
@@ -46,28 +46,20 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: "Tracker not found in this organization." }, { status: 404 });
   }
 
-  const candidates = files
-    .filter((f): f is { id: string; name: string; modifiedAt: string } =>
-      !!f && typeof f === "object" && typeof (f as { id?: unknown }).id === "string" && typeof (f as { modifiedAt?: unknown }).modifiedAt === "string",
-    );
-
+  const candidates = files.filter(
+    (f): f is { id: string; name: string } => !!f && typeof f === "object" && typeof (f as { id?: unknown }).id === "string",
+  );
   if (candidates.length === 0) {
     return NextResponse.json({ ok: true, needed: [] });
   }
 
   const existing = await prisma.driveSyncedFile.findMany({
     where: { trackerId, driveFileId: { in: candidates.map((c) => c.id) } },
-    select: { driveFileId: true, driveModifiedAt: true },
+    select: { driveFileId: true },
   });
-  const existingByFileId = new Map(existing.map((e) => [e.driveFileId, e.driveModifiedAt]));
+  const alreadySynced = new Set(existing.map((e) => e.driveFileId));
 
-  // Needed = never synced before, OR the file's own modified time has moved
-  // on since the version we last ingested (a real edit, not just a re-list).
-  const needed = candidates.filter((c) => {
-    const lastSynced = existingByFileId.get(c.id);
-    if (!lastSynced) return true;
-    return new Date(c.modifiedAt).getTime() > lastSynced.getTime();
-  });
+  const needed = candidates.filter((c) => !alreadySynced.has(c.id));
 
   return NextResponse.json({ ok: true, needed: needed.map((n) => ({ id: n.id, name: n.name })) });
 }

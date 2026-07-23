@@ -101,15 +101,18 @@ export async function ingestEvent(
     },
   });
 
-  // Drive-sync ledger — only when the caller sent both fields (the compare
+  // Drive-sync ledger — only when the caller sent driveFileId (the compare
   // endpoint's contract) and this is a real tracker, not a domain-only
-  // context doc. Upsert, not create: a file can be re-ingested after a real
-  // edit, which should just advance the ledger row, not duplicate it.
-  if (input.driveFileId && input.driveModifiedAt && trackerId) {
+  // context doc. Files in a synced folder are treated as static once
+  // placed — this is existence-only dedup, not change detection — so
+  // driveModifiedAt is just bookkeeping (defaults to "now" if the caller
+  // doesn't send it), never compared against on the read side.
+  if (input.driveFileId && trackerId) {
+    const modifiedAt = input.driveModifiedAt ? new Date(input.driveModifiedAt) : new Date();
     await prisma.driveSyncedFile.upsert({
       where: { trackerId_driveFileId: { trackerId, driveFileId: input.driveFileId } },
-      update: { driveModifiedAt: new Date(input.driveModifiedAt), eventId: event.id },
-      create: { orgId, trackerId, driveFileId: input.driveFileId, driveModifiedAt: new Date(input.driveModifiedAt), eventId: event.id },
+      update: { driveModifiedAt: modifiedAt, eventId: event.id },
+      create: { orgId, trackerId, driveFileId: input.driveFileId, driveModifiedAt: modifiedAt, eventId: event.id },
     });
   }
 
