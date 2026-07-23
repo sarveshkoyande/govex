@@ -3,7 +3,7 @@
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { UserPlus, FolderPlus, Tag, Ban, ChevronDown, ChevronUp } from "lucide-react";
+import { UserPlus, FolderPlus, Tag, Building2, Ban, ChevronDown, ChevronUp } from "lucide-react";
 import { promoteEntityCandidate, dismissEntityCandidate } from "@/app/actions/unresolvedEntities";
 import { cn } from "@/lib/utils";
 import type { PromotableEntityCandidate } from "@/lib/entityExtraction";
@@ -11,18 +11,21 @@ import type { PromotableEntityCandidate } from "@/lib/entityExtraction";
 const TYPE_LABEL: Record<PromotableEntityCandidate["entityType"], string> = {
   PERSON: "Person",
   PROJECT: "Project",
+  ORGANIZATION: "Organization",
   OTHER: "Other",
 };
 
 const PROMOTE_LABEL: Record<PromotableEntityCandidate["entityType"], string> = {
   PERSON: "Add as Stakeholder",
   PROJECT: "Add as Workstream",
+  ORGANIZATION: "Add as Organization",
   OTHER: "Add to Glossary",
 };
 
 const PROMOTE_ICON: Record<PromotableEntityCandidate["entityType"], typeof UserPlus> = {
   PERSON: UserPlus,
   PROJECT: FolderPlus,
+  ORGANIZATION: Building2,
   OTHER: Tag,
 };
 

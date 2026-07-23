@@ -131,33 +131,35 @@ export async function ingestEvent(
     }),
   );
 
-  // Knowledge-graph dictionary-tier extraction (free, deterministic) — see
-  // lib/entityExtraction.ts. Also fire-and-forget; a failure here never
-  // affects ingestion itself.
+  // Knowledge-graph extraction + concept-page compilation, all in ONE ordered
+  // background chain (fire-and-forget via after(), so a failure never affects
+  // ingestion and it still finishes on serverless). Ordering matters and is
+  // why these steps are chained rather than fired as independent after()
+  // callbacks:
+  //   1. dictionary tier (free, deterministic) records mentions of entities
+  //      already in the registry.
+  //   2. unresolved tier (Gemini NER) records new-entity candidates, then
+  //      auto-promotion turns recurring ones into real registry rows.
+  //   3. concept-page compilation (lib/conceptPage.ts) reads the mentions all
+  //      of the above just recorded and (re)compiles a narrative page for
+  //      every entity this event mentioned — it MUST run last so it sees the
+  //      complete mention set, including anything freshly promoted in step 2.
+  // Tracker-scoped events run the full chain; a domain-only event (no tracker)
+  // can't promote (promotion is tracker-scoped) but its dictionary mentions of
+  // existing terms/orgs can still feed a page, so it runs steps 1 + 3.
   after(() =>
-    import("@/lib/entityExtraction").then(({ extractDictionaryMentions }) =>
-      extractDictionaryMentions(orgId, "RAW_EVENT", event.id, rawText, trackerId),
-    ).catch((err) => {
-      console.error("[ingestEvent] background entity extraction failed for", event.id, err);
-    }),
-  );
-
-  // Unresolved-mention tier — the "wiki-link to a page that doesn't exist
-  // yet" case (see lib/entityExtraction.ts). One extra Gemini call per event,
-  // only when it belongs to a tracker (nothing to promote a new stakeholder
-  // into otherwise). Also fire-and-forget, same reasoning as above. Chained
-  // (not parallel) with auto-promotion — that step needs this one's mentions
-  // to already be recorded before it aggregates them.
-  if (trackerId) {
-    after(() =>
-      import("@/lib/entityExtraction").then(async ({ extractUnresolvedMentions, autoPromoteEntityCandidates }) => {
+    import("@/lib/entityExtraction").then(async ({ extractDictionaryMentions, extractUnresolvedMentions, autoPromoteEntityCandidates }) => {
+      await extractDictionaryMentions(orgId, "RAW_EVENT", event.id, rawText, trackerId);
+      if (trackerId) {
         await extractUnresolvedMentions(orgId, "RAW_EVENT", event.id, rawText, trackerId);
         await autoPromoteEntityCandidates(orgId, trackerId);
-      }).catch((err) => {
-        console.error("[ingestEvent] background unresolved-entity extraction/promotion failed for", event.id, err);
-      }),
-    );
-  }
+      }
+      const { compileConceptPagesForEvent } = await import("@/lib/conceptPage");
+      await compileConceptPagesForEvent(orgId, event.id);
+    }).catch((err) => {
+      console.error("[ingestEvent] background extraction/compilation failed for", event.id, err);
+    }),
+  );
 
   // Conceptual cross-theme linking (the CONCEPTUAL tier — Gemini judging
   // "these two themes are thematically related despite sharing no literal

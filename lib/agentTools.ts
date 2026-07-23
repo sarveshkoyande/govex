@@ -129,6 +129,28 @@ export async function getAgentToolDeclarations(orgId: string): Promise<FunctionD
     },
   },
   {
+    name: "search_concept_pages",
+    description:
+      "List this tracker's compiled concept pages — one continuously-updated narrative page per entity (people, projects/workstreams, systems/terms, external organizations) auto-compiled from ingested text. Returns a manifest: id, title, type, verificationStatus, mentionCount, and a narrative snippet. This is the PREFERRED first stop for any question about a specific person, project, system, or organization — the page is pre-synthesized, so you don't have to re-read raw events. Judge from the snippets which page to open with get_concept_page.",
+    parametersJsonSchema: {
+      type: "object",
+      properties: {
+        trackerId: { type: "string" },
+        subjectType: { type: "string", enum: ["STAKEHOLDER", "MICROBATTLE", "TERM", "ORGANIZATION"], description: "Optional — filter to one entity type." },
+      },
+      required: ["trackerId"],
+    },
+  },
+  {
+    name: "get_concept_page",
+    description: "Fetch one compiled concept page by id (from search_concept_pages): its full narrative, any contradictions surfaced across sources, its verificationStatus, and the source events behind it. An AI_COMPILED page is a compiled draft (cite it as such, not as verified fact); a HUMAN_VERIFIED page has been confirmed; STALE means it changed since it was last verified.",
+    parametersJsonSchema: {
+      type: "object",
+      properties: { pageId: { type: "string" } },
+      required: ["pageId"],
+    },
+  },
+  {
     name: "propose_create_stakeholder",
     description: "Propose adding a new stakeholder to a tracker — typically a name surfaced by list_unresolved_entities that keeps coming up. This does NOT create it yet — it stages a proposal the user must explicitly confirm in the chat UI.",
     parametersJsonSchema: {
@@ -466,6 +488,65 @@ async function getTrackerConnections(ctx: ToolContext, args: { trackerId: string
   };
 }
 
+async function searchConceptPages(ctx: ToolContext, args: { trackerId: string; subjectType?: string }) {
+  const tracker = await prisma.tracker.findFirst({ where: { id: args.trackerId, orgId: ctx.orgId }, select: { id: true } });
+  if (!tracker) return { error: "Tracker not found in this organization." };
+
+  const pages = await prisma.conceptPage.findMany({
+    where: {
+      orgId: ctx.orgId,
+      trackerId: tracker.id,
+      ...(args.subjectType ? { subjectType: args.subjectType } : {}),
+    },
+    orderBy: { mentionCount: "desc" },
+    take: 50,
+    select: { id: true, title: true, subjectType: true, verificationStatus: true, mentionCount: true, narrative: true, contradictions: true },
+  });
+
+  return {
+    note: "Pre-compiled narrative pages, one per entity. Prefer opening a relevant page with get_concept_page over re-reading raw events. An AI_COMPILED page is a compiled draft, not verified fact — cite it as such.",
+    pages: pages.map((p) => ({
+      id: p.id,
+      title: p.title,
+      type: p.subjectType,
+      verificationStatus: p.verificationStatus,
+      mentionCount: p.mentionCount,
+      hasContradictions: p.contradictions !== "[]",
+      snippet: `${p.narrative.slice(0, 240)}${p.narrative.length > 240 ? "…" : ""}`,
+    })),
+  };
+}
+
+async function getConceptPage(ctx: ToolContext, args: { pageId: string }) {
+  const page = await prisma.conceptPage.findFirst({ where: { id: args.pageId, orgId: ctx.orgId } });
+  if (!page) return { error: "Concept page not found in this organization." };
+
+  let contradictions: unknown = [];
+  try {
+    contradictions = JSON.parse(page.contradictions);
+  } catch {
+    contradictions = [];
+  }
+  let sourceEventIds: unknown = [];
+  try {
+    sourceEventIds = JSON.parse(page.sourceEventIds);
+  } catch {
+    sourceEventIds = [];
+  }
+
+  return {
+    note: "verificationStatus governs how to cite this: AI_COMPILED = a compiled draft synthesized from ingested text (say so — not verified fact); HUMAN_VERIFIED = confirmed; STALE = changed since last verified. Cite contradictions explicitly if present rather than picking a side.",
+    id: page.id,
+    title: page.title,
+    type: page.subjectType,
+    verificationStatus: page.verificationStatus,
+    mentionCount: page.mentionCount,
+    narrative: page.narrative,
+    contradictions,
+    sourceEventCount: Array.isArray(sourceEventIds) ? sourceEventIds.length : 0,
+  };
+}
+
 async function proposeCreateStakeholder(
   ctx: ToolContext,
   args: { trackerId: string; name: string; roleOnTracker?: string; ownsWhat?: string },
@@ -512,6 +593,10 @@ export async function executeAgentTool(name: string, args: Record<string, unknow
       return listUnresolvedEntities(ctx, args as { trackerId: string });
     case "get_tracker_connections":
       return getTrackerConnections(ctx, args as { trackerId: string });
+    case "search_concept_pages":
+      return searchConceptPages(ctx, args as { trackerId: string; subjectType?: string });
+    case "get_concept_page":
+      return getConceptPage(ctx, args as { pageId: string });
     case "propose_create_stakeholder":
       return proposeCreateStakeholder(ctx, args as { trackerId: string; name: string; roleOnTracker?: string; ownsWhat?: string });
     default:

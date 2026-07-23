@@ -33,7 +33,8 @@ export type SkillName =
   | "skill-patch-drafting"
   | "skill-authoring"
   | "entity-conceptual-linking"
-  | "unresolved-entity-classification";
+  | "unresolved-entity-classification"
+  | "concept-page-compilation";
 
 export function loadSkill(name: SkillName): string {
   const file = path.join(SKILLS_DIR, `${name}.md`);

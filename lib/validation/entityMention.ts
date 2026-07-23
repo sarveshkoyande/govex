@@ -21,7 +21,7 @@ export const unresolvedEntityClassificationSchema = z.object({
       z.object({
         term: z.string().min(1), // must echo one of the input candidates verbatim
         isEntity: z.boolean(),
-        entityType: z.enum(["PERSON", "PROJECT", "OTHER"]),
+        entityType: z.enum(["PERSON", "PROJECT", "ORGANIZATION", "OTHER"]),
         confidence: z.number().int().min(0).max(100),
       }),
     )

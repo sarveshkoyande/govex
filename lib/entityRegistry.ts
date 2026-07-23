@@ -6,7 +6,7 @@ import { prisma } from "@/lib/db";
 // This keeps extraction free of the fabrication risk open-ended NER would
 // carry, per the project's grounding discipline.
 export interface RegistryEntry {
-  targetType: "TRACKER" | "STAKEHOLDER" | "TERM" | "MICROBATTLE";
+  targetType: "TRACKER" | "STAKEHOLDER" | "TERM" | "MICROBATTLE" | "ORGANIZATION";
   targetId: string | null; // set for TRACKER/STAKEHOLDER, null for TERM
   targetTerm: string | null; // set for TERM, null otherwise
   aliases: string[]; // lowercased, longest-first is not required — caller sorts
@@ -80,7 +80,7 @@ export function isSpecificTerm(term: string): boolean {
 }
 
 export async function buildRegistry(orgId: string): Promise<RegistryEntry[]> {
-  const [trackers, stakeholders, microBattles, orgTerms] = await Promise.all([
+  const [trackers, stakeholders, microBattles, orgTerms, externalOrgs] = await Promise.all([
     prisma.tracker.findMany({ where: { orgId }, select: { id: true, name: true } }),
     prisma.stakeholder.findMany({ where: { tracker: { orgId } }, select: { id: true, name: true, email: true } }),
     // PROJECT-type unresolved-entity candidates promote into a MicroBattle
@@ -93,6 +93,11 @@ export async function buildRegistry(orgId: string): Promise<RegistryEntry[]> {
     // the runtime-growable counterpart to the hand-curated GLOSSARY_TERMS
     // list below, which ships with the app and can't grow at runtime.
     prisma.orgTerm.findMany({ where: { orgId }, select: { term: true, scope: true } }),
+    // ORGANIZATION-type candidates promote into an ExternalOrg (see
+    // lib/entityExtraction.ts) — registered here so a promoted org (a) stops
+    // being offered again as an unresolved candidate, and (b) gets recognized
+    // by future dictionary-tier extraction the same as any other named entity.
+    prisma.externalOrg.findMany({ where: { orgId }, select: { id: true, name: true } }),
   ]);
 
   const entries: RegistryEntry[] = [];
@@ -127,6 +132,10 @@ export async function buildRegistry(orgId: string): Promise<RegistryEntry[]> {
 
   for (const mb of microBattles) {
     entries.push({ targetType: "MICROBATTLE", targetId: mb.id, targetTerm: null, aliases: [mb.name.toLowerCase()], orgId });
+  }
+
+  for (const eo of externalOrgs) {
+    entries.push({ targetType: "ORGANIZATION", targetId: eo.id, targetTerm: null, aliases: [eo.name.toLowerCase()], orgId });
   }
 
   return entries;

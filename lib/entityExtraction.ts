@@ -246,7 +246,7 @@ export async function extractUnresolvedMentions(
 
 export interface PromotableEntityCandidate {
   term: string;
-  entityType: "PERSON" | "PROJECT" | "OTHER";
+  entityType: "PERSON" | "PROJECT" | "ORGANIZATION" | "OTHER";
   occurrences: number;
   sampleSnippet: string;
 }
@@ -325,7 +325,7 @@ export async function promoteCandidate(
   orgId: string,
   trackerId: string,
   term: string,
-  entityType: "PERSON" | "PROJECT" | "OTHER",
+  entityType: "PERSON" | "PROJECT" | "ORGANIZATION" | "OTHER",
 ): Promise<{ id: string; created: boolean }> {
   if (entityType === "PERSON") {
     const existing = await prisma.stakeholder.findFirst({ where: { trackerId, name: { equals: term, mode: "insensitive" } } });
@@ -339,6 +339,17 @@ export async function promoteCandidate(
     const count = await prisma.microBattle.count({ where: { trackerId } });
     const microBattle = await prisma.microBattle.create({ data: { trackerId, name: term, order: count } });
     return { id: microBattle.id, created: true };
+  }
+  if (entityType === "ORGANIZATION") {
+    // Org-scoped, not tracker-scoped: an external company/vendor (e.g.
+    // "Pfizer") is a standing party the whole org deals with, not owned by
+    // one tracker — so it upserts a single ExternalOrg row per org, the same
+    // way OTHER→OrgTerm is org-scoped. Same case-insensitive
+    // existence-check-before-create race guard as the branches above.
+    const existing = await prisma.externalOrg.findFirst({ where: { orgId, name: { equals: term, mode: "insensitive" } } });
+    if (existing) return { id: existing.id, created: false };
+    const externalOrg = await prisma.externalOrg.create({ data: { orgId, name: term } });
+    return { id: externalOrg.id, created: true };
   }
   const orgTerm = await prisma.orgTerm.upsert({
     where: { orgId_term: { orgId, term } },

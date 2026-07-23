@@ -54,6 +54,8 @@ model Organization {
   customSkills      CustomSkill[]
   entityMentions    EntityMention[]
   dismissedEntityCandidates DismissedEntityCandidate[]
+  externalOrgs      ExternalOrg[]
+  conceptPages      ConceptPage[]
 }
 
 // Org-scoped skills created live via the Skills Library's "describe a skill"
@@ -332,6 +334,88 @@ model OrgTerm {
 
   @@unique([orgId, term])
   @@index([orgId])
+}
+
+// The Organization entity type for the concept-page layer — an external
+// company / vendor / agency / regulator named in ingested text (e.g. "Pfizer",
+// "Accenture"), as distinct from the tenant `Organization` above (this app's
+// customer) and from an internal person/project/term. Deliberately its own
+// model rather than another OrgTerm scope: an org is a first-class named party
+// that gets its own compiled ConceptPage, not glossary vocabulary. Populated
+// by the same NER candidate→promote pipeline as the other entity types
+// (lib/entityExtraction.ts promoteCandidate, ORGANIZATION branch), and read by
+// buildRegistry() so a promoted org stops being re-offered and is recognized
+// by future dictionary-tier extraction.
+model ExternalOrg {
+  id        String   @id @default(cuid())
+  orgId     String
+  name      String
+  createdAt DateTime @default(now())
+
+  org Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@unique([orgId, name])
+  @@index([orgId])
+}
+
+// ===========================================================================
+// Concept-page layer (OpenKB parity). One continuously-updated narrative page
+// per distinct entity — the thing GovEx lacked: chat previously re-derived
+// every answer live from raw search instead of reading a pre-compiled page.
+// Compiled automatically on ingest (lib/conceptPage.ts) from the accumulated
+// EntityMention snippets for that subject; auto-published (matches the
+// autoPromoteEntities default). Polymorphic subject, same loose-reference
+// pattern as EntityMention — no hard FK, so one model covers all four types.
+// ===========================================================================
+model ConceptPage {
+  id        String  @id @default(cuid())
+  orgId     String
+  // Nullable — a TERM or ORGANIZATION can recur across several trackers, so a
+  // page isn't necessarily owned by one. Set for STAKEHOLDER/MICROBATTLE (a
+  // person/workstream belongs to a tracker); the tracker it was first compiled
+  // under for the cross-tracker types, purely for scoped listing.
+  trackerId String?
+
+  subjectType String  // STAKEHOLDER | MICROBATTLE | TERM | ORGANIZATION
+  subjectId   String? // Stakeholder/MicroBattle/ExternalOrg id — null for TERM
+  subjectTerm String? // the literal term — set for TERM, null otherwise
+  // Single always-non-null identity for the page, e.g. "STAKEHOLDER:<id>" or
+  // "TERM:<lowercased term>". The @@unique is on this rather than on the
+  // (subjectType, subjectId, subjectTerm) triple because that triple always
+  // has a null column (subjectTerm for id-backed types, subjectId for TERM),
+  // and Postgres treats NULLs as distinct — so a unique across it wouldn't
+  // actually prevent duplicate pages. subjectKey sidesteps that.
+  subjectKey  String
+
+  title     String
+  narrative String  // the compiled markdown narrative — the running story of this entity
+
+  // JSON array of RawIngestionEvent ids that fed the current narrative — grows
+  // as the entity is mentioned in more events across successive compiles.
+  sourceEventIds String @default("[]")
+  mentionCount   Int    @default(0)
+
+  // AI_COMPILED (the default — an unverified compiled draft, cite it as such,
+  // same honesty discipline as "yet to be reviewed" raw events) | HUMAN_VERIFIED
+  // | STALE (was verified, then new content changed it — flags that a human's
+  // verification no longer covers the current narrative).
+  verificationStatus String @default("AI_COMPILED")
+
+  // JSON array of contradictions surfaced during compilation — [{ claim,
+  // conflictingSources, note }]. The llm-wiki "open-questions" idea, scoped to
+  // the page it's about rather than a separate stakeholder-question row.
+  contradictions String @default("[]")
+
+  version       Int      @default(1)
+  lastCompiledAt DateTime @default(now())
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  org Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@unique([orgId, subjectKey])
+  @@index([orgId])
+  @@index([trackerId])
 }
 
 model User {

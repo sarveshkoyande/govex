@@ -27,7 +27,7 @@ export async function getUnresolvedEntityCandidates(trackerId: string): Promise<
 export async function promoteEntityCandidate(
   trackerId: string,
   term: string,
-  entityType: "PERSON" | "PROJECT" | "OTHER",
+  entityType: "PERSON" | "PROJECT" | "ORGANIZATION" | "OTHER",
 ): Promise<ActionResult<{ id: string }>> {
   const user = await getSessionUser();
   if (!user) return { ok: false, error: "Not authenticated." };
