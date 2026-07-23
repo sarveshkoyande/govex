@@ -4,6 +4,8 @@ import { ArrowLeft, Pencil, History, Inbox, FlaskConical, Mail, Users2, Sparkles
 import GenerateInsightsButton from "@/components/synthesis/GenerateInsightsButton";
 import DraftQuestionsButton from "@/components/synthesis/DraftQuestionsButton";
 import SyncDriveButton from "@/components/trackers/SyncDriveButton";
+import UnresolvedEntitiesPanel from "@/components/trackers/UnresolvedEntitiesPanel";
+import { findPromotableEntityCandidates } from "@/lib/entityExtraction";
 import OpenQuestionsPanel, { type QuestionRow } from "@/components/synthesis/OpenQuestionsPanel";
 import { getSessionUser, canWrite } from "@/lib/rbac";
 import { prisma } from "@/lib/db";
@@ -70,7 +72,7 @@ export default async function TrackerDetail({ params }: { params: Promise<{ id: 
   const t = await prisma.tracker.findFirst({ where: { id, orgId: user.orgId }, include: trackerInclude });
   if (!t) notFound();
 
-  const [history, ingestionEvents, pendingSuggestionCount, openQuestions, insightVotes] = await Promise.all([
+  const [history, ingestionEvents, pendingSuggestionCount, openQuestions, insightVotes, unresolvedCandidates] = await Promise.all([
     prisma.fieldChange.findMany({ where: { trackerId: id }, orderBy: { changedAt: "desc" }, take: 12 }),
     prisma.rawIngestionEvent.findMany({ where: { trackerId: id }, orderBy: { createdAt: "desc" }, take: 20 }),
     prisma.aiSuggestion.count({ where: { trackerId: id, status: "PENDING" } }),
@@ -94,6 +96,7 @@ export default async function TrackerDetail({ params }: { params: Promise<{ id: 
       },
       _count: true,
     }),
+    findPromotableEntityCandidates(user.orgId, id),
   ]);
   const writable = canWrite(user.role);
   const theme = toThemeData(t);
@@ -159,6 +162,10 @@ export default async function TrackerDetail({ params }: { params: Promise<{ id: 
           )}
         </div>
       </div>
+
+      {writable && unresolvedCandidates.length > 0 && (
+        <UnresolvedEntitiesPanel trackerId={t.id} initial={unresolvedCandidates} />
+      )}
 
       {/* Header */}
       <div className="flex flex-col gap-3">
