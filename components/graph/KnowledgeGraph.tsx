@@ -41,18 +41,19 @@ const NODE_TYPE_LABEL: Record<GraphNode["type"], string> = {
 };
 // Content nodes (insights/tactics/raw events) can run into the hundreds —
 // always-on labels for those would bury the theme/domain/stakeholder labels
-// that matter most at a glance. Only these types get a persistent label;
-// everything else only shows its label in the click detail panel.
-// UNRESOLVED_ENTITY is included deliberately, unlike other content nodes —
-// the whole point is that it should be visible without clicking, the same
-// way Obsidian always labels an unresolved link.
+// that matter most at a glance. Only these types get a persistent label
+// (Sigma's per-node `forceLabel` attribute, set below); everything else
+// only shows its label on hover or in the click detail panel.
 const ALWAYS_LABELED = new Set<GraphNode["type"]>(["TRACKER", "DOMAIN", "STAKEHOLDER", "UNRESOLVED_ENTITY"]);
-const EDGE_STYLE: Record<GraphEdge["kind"], { color: string; width: number; dash?: number[] }> = {
-  STRUCTURAL: { color: "rgba(59, 130, 246, 0.5)", width: 1.4 },
-  DICTIONARY: { color: "rgba(45, 212, 191, 0.65)", width: 1.2, dash: [3, 3] },
-  CONCEPTUAL: { color: "rgba(251, 146, 60, 0.65)", width: 1.2, dash: [1, 3] },
-  DERIVED: { color: "rgba(217, 70, 239, 0.65)", width: 1.2, dash: [6, 2] },
-  UNRESOLVED: { color: "rgba(148, 163, 184, 0.55)", width: 1, dash: [1, 2] },
+// Sigma's default edge renderer draws plain lines — no native dash-pattern
+// support without a custom edge program, so kind is differentiated by
+// color + width instead of the force-graph version's dash patterns.
+const EDGE_STYLE: Record<GraphEdge["kind"], { color: string; width: number }> = {
+  STRUCTURAL: { color: "rgba(59, 130, 246, 0.55)", width: 1.4 },
+  DICTIONARY: { color: "rgba(45, 212, 191, 0.7)", width: 1.1 },
+  CONCEPTUAL: { color: "rgba(251, 146, 60, 0.7)", width: 1.1 },
+  DERIVED: { color: "rgba(217, 70, 239, 0.7)", width: 1.1 },
+  UNRESOLVED: { color: "rgba(148, 163, 184, 0.5)", width: 0.9 },
 };
 const EDGE_KIND_LABEL: Record<GraphEdge["kind"], string> = {
   STRUCTURAL: "Structural relationship",
@@ -62,16 +63,7 @@ const EDGE_KIND_LABEL: Record<GraphEdge["kind"], string> = {
   UNRESOLVED: "Unresolved mention",
 };
 
-interface FGNode extends GraphNode {
-  x?: number;
-  y?: number;
-}
-interface FGLink extends Omit<GraphEdge, "source" | "target"> {
-  source: string | FGNode;
-  target: string | FGNode;
-}
-
-type Selection = { type: "node"; node: FGNode } | { type: "edge"; edge: FGLink } | null;
+type Selection = { type: "node"; node: GraphNode } | { type: "edge"; edge: GraphEdge } | null;
 
 function nodeHref(node: GraphNode): string | null {
   const [type, id] = node.id.split(":");
@@ -79,14 +71,11 @@ function nodeHref(node: GraphNode): string | null {
   return null;
 }
 
-function endpointLabel(end: string | FGNode): string {
-  return typeof end === "string" ? end : end.label;
-}
-
 export default function KnowledgeGraph({ nodes, edges }: { nodes: GraphNode[]; edges: GraphEdge[] }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasHostRef = useRef<HTMLDivElement>(null);
-  const graphRef = useRef<any>(null);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const rendererRef = useRef<any>(null);
   const [size, setSize] = useState({ width: 900, height: 520 });
   const [visibleKinds, setVisibleKinds] = useState<Set<GraphEdge["kind"]>>(new Set(["STRUCTURAL", "DICTIONARY", "CONCEPTUAL", "DERIVED", "UNRESOLVED"]));
   const [showContent, setShowContent] = useState(true);
@@ -105,15 +94,7 @@ export default function KnowledgeGraph({ nodes, edges }: { nodes: GraphNode[]; e
     return ids;
   }, [filteredEdges]);
   const filteredNodes = useMemo(() => nodes.filter((n) => connectedIds.has(n.id)), [nodes, connectedIds]);
-
-  const graphData = useMemo(
-    () => ({
-      nodes: filteredNodes.map((n) => ({ ...n })) as FGNode[],
-      links: filteredEdges.map((e) => ({ ...e })) as unknown as FGLink[],
-    }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [filteredNodes, filteredEdges],
-  );
+  const nodeById = useMemo(() => new Map(filteredNodes.map((n) => [n.id, n])), [filteredNodes]);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -126,70 +107,95 @@ export default function KnowledgeGraph({ nodes, edges }: { nodes: GraphNode[]; e
   useEffect(() => {
     if (!canvasHostRef.current) return;
     let cancelled = false;
-    let instance: any = null;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let renderer: any = null;
 
-    import("force-graph").then(({ default: ForceGraph }) => {
+    (async () => {
+      const [{ default: Graph }, { default: Sigma }, forceAtlas2Module] = await Promise.all([
+        import("graphology"),
+        import("sigma"),
+        import("graphology-layout-forceatlas2"),
+      ]);
       if (cancelled || !canvasHostRef.current) return;
-      instance = new ForceGraph(canvasHostRef.current)
-        .graphData(graphData)
-        .width(size.width)
-        .height(size.height)
-        .nodeRelSize(1)
-        .nodeVal((n: any) => NODE_RADIUS[n.type as GraphNode["type"]] ** 2)
-        .nodeColor((n: any) => NODE_COLOR[n.type as GraphNode["type"]])
-        .nodeLabel(() => "")
-        .linkColor((l: any) => EDGE_STYLE[l.kind as GraphEdge["kind"]].color)
-        .linkWidth((l: any) => EDGE_STYLE[l.kind as GraphEdge["kind"]].width)
-        .linkLineDash((l: any) => EDGE_STYLE[l.kind as GraphEdge["kind"]].dash ?? null)
-        .linkDirectionalParticles(0)
-        .cooldownTime(4000)
-        .d3AlphaDecay(0.015)
-        .d3VelocityDecay(0.28)
-        .onNodeClick((n: any) => setSelection({ type: "node", node: n as FGNode }))
-        .onLinkClick((l: any) => setSelection({ type: "edge", edge: l as FGLink }))
-        .onBackgroundClick(() => setSelection(null))
-        .nodeCanvasObject((n: any, ctx: CanvasRenderingContext2D, globalScale: number) => {
-          const type = n.type as GraphNode["type"];
-          const r = NODE_RADIUS[type];
-          ctx.beginPath();
-          ctx.arc(n.x ?? 0, n.y ?? 0, r, 0, 2 * Math.PI);
-          ctx.fillStyle = NODE_COLOR[type];
-          ctx.fill();
+      const forceAtlas2 = forceAtlas2Module.default;
 
-          if (ALWAYS_LABELED.has(type)) {
-            const fontSize = 11 / globalScale;
-            ctx.font = `600 ${fontSize}px Inter, system-ui, sans-serif`;
-            ctx.textAlign = "center";
-            ctx.textBaseline = "top";
-            ctx.fillStyle = "rgba(226, 232, 240, 0.92)";
-            ctx.fillText(n.label, n.x ?? 0, (n.y ?? 0) + r + 3);
-          }
-        })
-        .nodePointerAreaPaint((n: any, color: string, ctx: CanvasRenderingContext2D) => {
-          const r = NODE_RADIUS[n.type as GraphNode["type"]] + 3;
-          ctx.fillStyle = color;
-          ctx.beginPath();
-          ctx.arc(n.x ?? 0, n.y ?? 0, r, 0, 2 * Math.PI);
-          ctx.fill();
-        })
-        // Fit the whole graph into the visible canvas once the simulation
-        // settles, instead of leaving it at whatever zoom/pan the physics
-        // happened to end up at — re-fit on every engine-stop (e.g. after a
-        // filter toggle reruns the simulation), not just the first load.
-        .onEngineStop(() => instance?.zoomToFit(400, 40));
-      graphRef.current = instance;
-    });
+      // multi: true — GovEx's own edge data can legitimately contain more
+      // than one edge between the same pair of nodes (e.g. two separate
+      // DICTIONARY mentions), which a plain (non-multi) graphology graph
+      // would silently collapse.
+      const graph = new Graph({ multi: true, type: "mixed" });
+
+      for (const n of filteredNodes) {
+        graph.addNode(n.id, {
+          x: Math.random(),
+          y: Math.random(),
+          size: NODE_RADIUS[n.type],
+          color: NODE_COLOR[n.type],
+          label: n.label,
+          forceLabel: ALWAYS_LABELED.has(n.type),
+        });
+      }
+      for (const e of filteredEdges) {
+        if (!graph.hasNode(e.source) || !graph.hasNode(e.target)) continue;
+        graph.addEdge(e.source, e.target, {
+          size: EDGE_STYLE[e.kind].width,
+          color: EDGE_STYLE[e.kind].color,
+          govexKind: e.kind,
+          govexDetail: e.detail,
+          govexConfidence: e.confidence,
+        });
+      }
+
+      // One-shot layout (not a continuously-running simulation) — settles
+      // into natural clustering, then Sigma just renders + handles
+      // pan/zoom/drag from there. Cheaper and steadier than re-running
+      // physics on every interaction.
+      if (graph.order > 0) {
+        forceAtlas2.assign(graph, {
+          iterations: 150,
+          settings: { gravity: 1, scalingRatio: 10, strongGravityMode: true, slowDown: 2, barnesHutOptimize: graph.order > 200 },
+        });
+      }
+
+      renderer = new Sigma(graph, canvasHostRef.current, {
+        renderLabels: true,
+        labelRenderedSizeThreshold: 0,
+        labelColor: { color: "#e2e8f0" },
+        labelFont: "Inter, system-ui, sans-serif",
+        labelWeight: "600",
+        defaultNodeColor: "#94a3b8",
+        defaultEdgeColor: "rgba(148, 163, 184, 0.4)",
+        minCameraRatio: 0.03,
+        maxCameraRatio: 12,
+      });
+
+      renderer.on("clickNode", ({ node }: { node: string }) => {
+        const n = nodeById.get(node);
+        if (n) setSelection({ type: "node", node: n });
+      });
+      renderer.on("clickEdge", ({ edge }: { edge: string }) => {
+        const attrs = graph.getEdgeAttributes(edge);
+        const [source, target] = graph.extremities(edge);
+        setSelection({
+          type: "edge",
+          edge: { source, target, kind: attrs.govexKind, detail: attrs.govexDetail, confidence: attrs.govexConfidence },
+        });
+      });
+      renderer.on("clickStage", () => setSelection(null));
+
+      rendererRef.current = renderer;
+    })();
 
     return () => {
       cancelled = true;
-      if (instance?._destructor) instance._destructor();
-      if (canvasHostRef.current) canvasHostRef.current.innerHTML = "";
+      renderer?.kill();
+      rendererRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [graphData]);
+  }, [filteredNodes, filteredEdges]);
 
   useEffect(() => {
-    graphRef.current?.width(size.width).height(size.height);
+    rendererRef.current?.resize();
   }, [size]);
 
   function toggleKind(kind: GraphEdge["kind"]) {
@@ -258,7 +264,7 @@ export default function KnowledgeGraph({ nodes, edges }: { nodes: GraphNode[]; e
                 {EDGE_KIND_LABEL[selection.edge.kind]}
               </p>
               <p className="text-[11px] font-semibold leading-snug text-foreground">
-                {endpointLabel(selection.edge.source)} ↔ {endpointLabel(selection.edge.target)}
+                {nodeById.get(selection.edge.source)?.label ?? selection.edge.source} ↔ {nodeById.get(selection.edge.target)?.label ?? selection.edge.target}
               </p>
               {selection.edge.detail && <p className="text-[11px] leading-relaxed text-muted-foreground">{selection.edge.detail}</p>}
               {selection.edge.confidence != null && selection.edge.kind === "CONCEPTUAL" && (

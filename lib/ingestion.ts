@@ -159,6 +159,23 @@ export async function ingestEvent(
     );
   }
 
+  // Conceptual cross-theme linking (the CONCEPTUAL tier — Gemini judging
+  // "these two themes are thematically related despite sharing no literal
+  // vocabulary," see lib/entityExtraction.ts rebuildConceptualMentions) only
+  // has anything to compute off of when a CONTEXT_DOC lands — that's the
+  // only source buildProfiles() reads. Re-running it compares every
+  // context-doc'd theme in the org against every other, so this only fires
+  // on the (comparatively rare) context-doc upload, not on ordinary meeting/
+  // email ingestion. Org-wide, not tracker-scoped, since a new context doc
+  // can surface a fresh connection to ANY other theme in the org.
+  if (input.source === "CONTEXT_DOC") {
+    after(() =>
+      import("@/lib/entityExtraction").then(({ rebuildConceptualMentions }) => rebuildConceptualMentions(orgId)).catch((err) => {
+        console.error("[ingestEvent] background conceptual-linking rebuild failed for org", orgId, err);
+      }),
+    );
+  }
+
   // Stage 3 — if this event is tagged as answering an open question, close
   // the loop. Lenient on failure: an invalid/stale tag never fails ingestion,
   // it just doesn't link (the event is still stored either way).
