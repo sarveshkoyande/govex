@@ -74,20 +74,41 @@ async function subjectFromMention(
   }
 }
 
+// Tracker-owned subject types (a person/workstream belongs to exactly one
+// tracker). For these, a page is scoped to that tracker: it's only ever
+// compiled from — and by events on — its own tracker. TERM/ORGANIZATION are
+// genuinely cross-tracker (a glossary term or external vendor recurs across
+// engagements) and stay org-wide.
+function isTrackerScoped(t: ConceptSubjectType): boolean {
+  return t === "STAKEHOLDER" || t === "MICROBATTLE";
+}
+
 // Which entities did THIS event mention that deserve a (re)compiled page?
 // Reads the event's own EntityMention rows and resolves each to a subject,
 // deduped by subjectKey. Deliberately reads mentions rather than re-parsing
 // text — extraction already did the grounded work; this just aggregates it.
+//
+// Dictionary matching is org-wide, so an event on tracker A that names "Vivek
+// Ghai" also records a mention against a *different* same-named stakeholder
+// row on tracker B. We must NOT build (or recompile) B's page from an A event
+// — that would leak A's content into B's page. So a tracker-scoped subject is
+// only produced when its own tracker matches this event's tracker.
 export async function resolveSubjectsForEvent(orgId: string, eventId: string): Promise<ConceptSubject[]> {
-  const mentions = await prisma.entityMention.findMany({
-    where: { orgId, sourceType: "RAW_EVENT", sourceId: eventId },
-    select: { targetType: true, targetId: true, targetTerm: true, trackerId: true },
-  });
+  const [event, mentions] = await Promise.all([
+    prisma.rawIngestionEvent.findUnique({ where: { id: eventId }, select: { trackerId: true } }),
+    prisma.entityMention.findMany({
+      where: { orgId, sourceType: "RAW_EVENT", sourceId: eventId },
+      select: { targetType: true, targetId: true, targetTerm: true, trackerId: true },
+    }),
+  ]);
+  const eventTrackerId = event?.trackerId ?? null;
 
   const byKey = new Map<string, ConceptSubject>();
   for (const m of mentions) {
     const subject = await subjectFromMention(m);
-    if (subject) byKey.set(subjectKey(subject), subject);
+    if (!subject) continue;
+    if (isTrackerScoped(subject.subjectType) && subject.trackerId !== eventTrackerId) continue;
+    byKey.set(subjectKey(subject), subject);
   }
   return [...byKey.values()];
 }
@@ -109,12 +130,38 @@ async function gatherEvidence(orgId: string, subject: ConceptSubject) {
 
   const mentions = await prisma.entityMention.findMany({
     where: { orgId, OR: or },
-    select: { contextSnippet: true, sourceType: true, sourceId: true, createdAt: true },
+    select: { contextSnippet: true, sourceType: true, sourceId: true, trackerId: true, createdAt: true },
     orderBy: { createdAt: "asc" },
   });
 
-  const snippets = mentions.map((m) => m.contextSnippet).filter(Boolean);
-  const sourceEventIds = [...new Set(mentions.filter((m) => m.sourceType === "RAW_EVENT").map((m) => m.sourceId))];
+  // For a tracker-scoped subject, keep only mentions whose source belongs to
+  // that subject's own tracker — org-wide dictionary matching otherwise pulls
+  // in a same-named entity's mentions from unrelated trackers (see
+  // resolveSubjectsForEvent). Resolve each mention's tracker from its source.
+  let scoped = mentions;
+  if (isTrackerScoped(subject.subjectType) && subject.trackerId) {
+    const rawIds = mentions.filter((m) => m.sourceType === "RAW_EVENT").map((m) => m.sourceId);
+    const stratIds = mentions.filter((m) => m.sourceType === "STRATEGY_INSIGHT").map((m) => m.sourceId);
+    const tacticIds = mentions.filter((m) => m.sourceType === "TACTIC_INSIGHT").map((m) => m.sourceId);
+    const [rawEvents, stratInsights, tacticInsights] = await Promise.all([
+      rawIds.length ? prisma.rawIngestionEvent.findMany({ where: { id: { in: rawIds } }, select: { id: true, trackerId: true } }) : [],
+      stratIds.length ? prisma.strategyInsight.findMany({ where: { id: { in: stratIds } }, select: { id: true, trackerId: true } }) : [],
+      tacticIds.length ? prisma.tacticInsight.findMany({ where: { id: { in: tacticIds } }, select: { id: true, tactic: { select: { microBattle: { select: { trackerId: true } } } } } }) : [],
+    ]);
+    const rawMap = new Map(rawEvents.map((e) => [e.id, e.trackerId]));
+    const stratMap = new Map(stratInsights.map((e) => [e.id, e.trackerId]));
+    const tacticMap = new Map(tacticInsights.map((e) => [e.id, e.tactic.microBattle.trackerId]));
+    scoped = mentions.filter((m) => {
+      let t: string | null = null;
+      if (m.sourceType === "RAW_EVENT") t = rawMap.get(m.sourceId) ?? m.trackerId;
+      else if (m.sourceType === "STRATEGY_INSIGHT") t = stratMap.get(m.sourceId) ?? null;
+      else if (m.sourceType === "TACTIC_INSIGHT") t = tacticMap.get(m.sourceId) ?? null;
+      return t === subject.trackerId;
+    });
+  }
+
+  const snippets = scoped.map((m) => m.contextSnippet).filter(Boolean);
+  const sourceEventIds = [...new Set(scoped.filter((m) => m.sourceType === "RAW_EVENT").map((m) => m.sourceId))];
   return { snippets, sourceEventIds };
 }
 
@@ -230,4 +277,37 @@ export async function compileConceptPagesForEvent(orgId: string, eventId: string
       console.error("[compileConceptPagesForEvent] failed to compile", subject.title, err instanceof Error ? err.message : err);
     }
   }
+}
+
+// Full org-wide rebuild — drops all existing pages and recompiles one per
+// distinct entity from the current mention set. The counterpart to
+// rebuildDictionaryMentions / rebuildConceptualMentions (lib/entityExtraction.ts):
+// safe to run anytime (e.g. after a compile-logic change, or an admin
+// "Rebuild pages" action) since every page is derived, never hand-authored.
+// Note this resets any HUMAN_VERIFIED status — a full rebuild is a deliberate
+// "recompile everything from scratch," so that's expected.
+export async function recompileAllConceptPages(orgId: string): Promise<{ subjects: number; compiled: number }> {
+  await prisma.conceptPage.deleteMany({ where: { orgId } });
+
+  const mentions = await prisma.entityMention.findMany({
+    where: { orgId, targetType: { in: ["STAKEHOLDER", "MICROBATTLE", "TERM", "ORGANIZATION"] } },
+    select: { targetType: true, targetId: true, targetTerm: true, trackerId: true },
+  });
+
+  const byKey = new Map<string, ConceptSubject>();
+  for (const m of mentions) {
+    const subject = await subjectFromMention(m);
+    if (subject) byKey.set(subjectKey(subject), subject);
+  }
+
+  let compiled = 0;
+  for (const subject of byKey.values()) {
+    try {
+      const r = await compileConceptPage(orgId, subject);
+      if (r.compiled) compiled++;
+    } catch (err) {
+      console.error("[recompileAllConceptPages] failed to compile", subject.title, err instanceof Error ? err.message : err);
+    }
+  }
+  return { subjects: byKey.size, compiled };
 }
