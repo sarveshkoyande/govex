@@ -13,8 +13,20 @@ import { prisma } from "@/lib/db";
 //
 // POST /api/drive-sync/compare
 // Authorization: Bearer <ingestion API token>   (same keys as /api/ingest)
-// body: { trackerId: string, files: [{ id: string, name: string }] }
+// body: { trackerId: string, files: [...] } — each file object accepts
+//   EITHER { id, name } OR SharePoint's raw "Get files (properties only)"
+//   shape { "{Identifier}": string, "{FilenameWithExtension}": string, ... }
+//   directly, so the flow can pass that action's output straight through
+//   with no Select/transform step in between.
 // response: { ok: true, needed: [{ id: string, name: string }] }
+function normalizeFile(f: unknown): { id: string; name: string } | null {
+  if (!f || typeof f !== "object") return null;
+  const rec = f as Record<string, unknown>;
+  const id = rec.id ?? rec["{Identifier}"];
+  const name = rec.name ?? rec["{FilenameWithExtension}"] ?? rec["{Name}"];
+  if (typeof id !== "string" || typeof name !== "string") return null;
+  return { id, name };
+}
 export async function POST(req: Request) {
   const authHeader = req.headers.get("authorization") ?? "";
   const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : "";
@@ -46,9 +58,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: "Tracker not found in this organization." }, { status: 404 });
   }
 
-  const candidates = files.filter(
-    (f): f is { id: string; name: string } => !!f && typeof f === "object" && typeof (f as { id?: unknown }).id === "string",
-  );
+  const candidates = files.map(normalizeFile).filter((f): f is { id: string; name: string } => f !== null);
   if (candidates.length === 0) {
     return NextResponse.json({ ok: true, needed: [] });
   }
